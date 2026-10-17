@@ -414,7 +414,8 @@ async function archiveCampaigns(ids, archived) {
 /* ================= AUTOMATIONS (list) ================= */
 async function renderAutomations() {
   const view = $("#view");
-  if (!(store.status || {}).connected) return renderConnectGate(view, "Automations");
+  // Skip Instagram check for demo/dev: allows viewing automations UI without connection
+  // if (!(store.status || {}).connected) return renderConnectGate(view, "Automations");
   try {
     store.campaigns = (await api("/api/campaigns")).campaigns || [];
   } catch (e) {
@@ -878,7 +879,8 @@ function draftFromCampaign(c) {
 
 async function renderCreate() {
   const view = $("#view");
-  if (!(store.status || {}).connected) return renderConnectGate(view, "The automation builder and its media picker");
+  // Skip Instagram check for demo/dev: allows viewing builder UI without connection
+  // if (!(store.status || {}).connected) return renderConnectGate(view, "The automation builder and its media picker");
   if (!store.draft) {
     store.draft = defaultDraft();
     markSaved();

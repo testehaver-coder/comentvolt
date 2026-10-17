@@ -215,6 +215,43 @@
     "your link": "seu link",
     "your@email.com": "seu@email.com",
     "✓ followed": "✓ seguiu",
+    "Material delivery link": "Link de entrega do material",
+    "Reminder button name": "Nome do botão do lembrete",
+    "Follow-up DM if they don't click": "DM de lembrete se a pessoa não clicar",
+    "Reminder message": "Mensagem de lembrete",
+    "Delivery button": "Botão de entrega",
+    "Automation features": "Funções da automação",
+    "Turn each function on or off independently. All are enabled by default.": "Ligue ou desligue cada função independentemente. Todas estão ligadas por padrão.",
+    "Comment Detection": "Detecção de comentários",
+    "Monitor for keywords": "Monitorar palavras-chave",
+    "Watch comments for your keywords": "Acompanhe comentários com suas palavras-chave",
+    "Public Reply": "Resposta pública",
+    "Reply publicly": "Responder em público",
+    "Post reply under the comment with @mention": "Responda em público embaixo do comentário com @menção",
+    "Private Message Flow": "Fluxo de mensagem privada",
+    "Send opening DM": "Enviar DM de abertura",
+    "Private reply with button (starts the funnel)": "Resposta privada com botão (inicia o funil)",
+    "Opening button": "Botão de abertura",
+    "Button in the opening message": "Botão na mensagem de abertura",
+    "Follow Gate": "Portão de seguir",
+    "Ask to follow": "Pedir para seguir",
+    "Request user to follow before continuing": "Peça ao usuário para seguir antes de continuar",
+    "Confirmation button": "Botão de confirmação",
+    "Show 'Already following' button": "Mostrar botão 'Já estou seguindo'",
+    "Verify via API": "Verificar via API",
+    "Check if they really followed": "Verifique se realmente seguiram",
+    "Retry if not confirmed": "Tentar novamente se não confirmado",
+    "Resend message if follow not verified": "Reenvie a mensagem se o seguimento não for verificado",
+    "Reward Delivery": "Entrega da recompensa",
+    "Send the link": "Enviar o link",
+    "Deliver final link/reward automatically": "Entregue o link/recompensa final automaticamente",
+    "Track clicks": "Rastrear cliques",
+    "Record when they open the link": "Registre quando abrem o link",
+    "Reminder after 24h": "Lembrete depois de 24h",
+    "Follow-up DM if link never opened": "DM de lembrete se o link nunca foi aberto",
+    "Email Collection": "Coleta de e-mail",
+    "Ask for email": "Pedir e-mail",
+    "Request email via Instagram chip": "Peça e-mail via botão do Instagram",
   };
 
   const plural = (n, one, many) => (n === "1" ? one : many);
@@ -243,7 +280,7 @@
   ];
 
   const DICTS = { pt: { exact: PT, patterns: PT_PATTERNS } };
-  let lang = "en";
+  let lang = "pt";
 
   /** Translate one UI string, keeping its surrounding whitespace; unknown text is returned as is. */
   function t(text) {
