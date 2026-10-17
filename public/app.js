@@ -1164,6 +1164,11 @@ const FIELD_PREVIEW = {
   c_delivery_url: ["dm", "delivery"],
   c_followup_message: ["dm", "followup"],
   c_followup_button: ["dm", "followup"],
+  c_recommendation_message: ["dm", "recommendation"],
+  c_recommendation_button: ["dm", "recommendation"],
+  c_recommendation_link: ["dm", "recommendation"],
+  rec_enabled: ["dm", "recommendation"],
+  rec_delay: ["dm", "recommendation"],
   reward_value: ["dm", "delivery"],
   fu_delay: ["dm", "followup"],
   fu_text: ["dm", "followup"],
@@ -1484,6 +1489,12 @@ function renderPreview() {
       const followupBtnLabel = d.copy.followup_button || "Get material";
       blocks.push(`<div class="dm-note">${esc(t(`If they don't open the link, ${delayLabel(d.followup.delay_minutes)} later:`))}</div>`);
       blocks.push(ours(`<div class="dm-text">${esc(followupMsg)}</div>${button(followupBtnLabel, "followup_button")}`, "followup"));
+    }
+    if (d.recommendation.enabled) {
+      const recMsg = d.recommendation.message || "Check this out!";
+      const recBtnLabel = d.recommendation.button_label || "See more";
+      blocks.push(`<div class="dm-note">${esc(t(`After they complete the funnel, ${delayLabel(d.recommendation.delay_minutes)} later:`))}</div>`);
+      blocks.push(ours(`<div class="dm-text">${esc(recMsg)}</div>${button(recBtnLabel, "recommendation_button")}`, "recommendation"));
     }
     const dmHeader = `
       <div class="ig-appbar">${PHONE_ICON.back}<span class="chat-who" title="${t("Visit profile")}" style="cursor:pointer">${phoneAvatar("sm")}<span class="name">${esc(uname)}</span></span><span style="color:#a8a8a8;font-size:11px;margin-left:auto;padding-right:8px;cursor:pointer" title="${t("Visit profile")}">👤</span>${PHONE_ICON.call}${PHONE_ICON.video}</div>`;
