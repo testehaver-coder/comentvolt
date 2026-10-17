@@ -1496,7 +1496,7 @@ function renderPreview() {
       blocks.push(ours(`<div class="dm-text">${esc(recMsg)}</div>${button(recBtnLabel, "recommendation_button")}`, "recommendation"));
     }
     const dmHeader = `
-      <div class="ig-appbar">${PHONE_ICON.back}<span class="chat-who" title="${t("Visit profile")}" style="cursor:pointer">${phoneAvatar("sm")}<span class="name">${esc(uname)}</span></span><span style="color:#a8a8a8;font-size:11px;margin-left:auto;padding-right:8px;cursor:pointer" title="${t("Visit profile")}">👤</span>${PHONE_ICON.call}${PHONE_ICON.video}</div>`;
+      <div class="ig-appbar">${PHONE_ICON.back}<span class="chat-who" title="${t("Visit profile")}" style="cursor:pointer">${phoneAvatar("sm")}<div style="display:flex;flex-direction:column;flex:1;min-width:0"><span class="name">${esc(uname)}</span><span style="color:#a8a8a8;font-size:11px">${t("Active now")}</span></div></span><span style="color:#a8a8a8;font-size:11px;margin-left:auto;padding-right:8px;cursor:pointer" title="${t("Visit profile")}">👤</span>${PHONE_ICON.call}${PHONE_ICON.video}</div>`;
     screen = `
       ${dmHeader}
       <div class="ig-content"><div class="dm">${groupWithAvatar(blocks.join(""))}</div></div>

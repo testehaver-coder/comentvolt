@@ -306,11 +306,12 @@ textarea { resize: vertical; min-height: 66px; }
 .dm { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px 12px; }
 .dm-row { display: flex; align-items: flex-end; gap: 6px; }
 .dm-av { margin-bottom: 1px; }
-.dm-card { max-width: 76%; background: linear-gradient(135deg, #0a0a0a 0%, #1a1a1a 100%); border-radius: 18px; padding: 9px 10px 10px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.08); }
-.dm-text { padding: 0 3px; line-height: 1.35; overflow-wrap: anywhere; white-space: pre-wrap; }
-.dm-card-btn { background: linear-gradient(135deg, #1a1a1a 0%, #0f0f0f 100%); border: 1px solid rgba(107, 92, 246, 0.3); border-radius: 10px; padding: 7px 10px; text-align: center; font-weight: 600; color: #b8a9ff; cursor: pointer; transition: all 0.2s ease; }
-.dm-card-btn:hover { background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%); border-color: rgba(107, 92, 246, 0.6); box-shadow: 0 2px 8px rgba(107, 92, 246, 0.2); transform: translateY(-1px); }
-.bubble.out { align-self: flex-end; max-width: 72%; background: linear-gradient(135deg, #6b5cf6 0%, #8674f9 100%); color: #fff; border-radius: 18px; padding: 8px 13px; font-weight: 600; overflow-wrap: anywhere; box-shadow: 0 4px 12px rgba(107, 92, 246, 0.3); }
+.dm-card { max-width: 76%; background: linear-gradient(135deg, #0a0a0a 0%, #1a1a1a 100%); border-radius: 20px; padding: 11px 14px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.08); }
+.dm-text { padding: 0 3px; line-height: 1.35; overflow-wrap: anywhere; white-space: pre-wrap; color: #e8e8e8; font-size: 15px; }
+.dm-card-btn { background: linear-gradient(135deg, #1a1a1a 0%, #0f0f0f 100%); border: 1px solid rgba(107, 92, 246, 0.4); border-radius: 20px; padding: 8px 14px; text-align: center; font-weight: 600; color: #b8a9ff; cursor: pointer; transition: all 0.2s ease; font-size: 14px; }
+.dm-card-btn:hover { background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%); border-color: rgba(107, 92, 246, 0.7); box-shadow: 0 4px 12px rgba(107, 92, 246, 0.25); transform: translateY(-1px); }
+.dm-card-btn:active { transform: translateY(0); }
+.bubble.out { align-self: flex-end; max-width: 72%; background: linear-gradient(135deg, #6b5cf6 0%, #8674f9 100%); color: #fff; border-radius: 20px; padding: 9px 14px; font-weight: 500; overflow-wrap: anywhere; box-shadow: 0 4px 12px rgba(107, 92, 246, 0.35); font-size: 15px; }
 .qr { align-self: flex-end; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .qr .pill { border: 1px solid rgba(107, 92, 246, 0.5); color: #a99cff; border-radius: 999px; padding: 5px 12px; font-size: 12px; font-weight: 600; background: rgba(107, 92, 246, 0.1); transition: all 0.2s ease; cursor: pointer; }
 .qr .pill:hover { border-color: rgba(107, 92, 246, 0.8); background: rgba(107, 92, 246, 0.15); box-shadow: 0 2px 6px rgba(107, 92, 246, 0.15); }

@@ -43,6 +43,7 @@
     "A specific word or words": "Uma ou mais palavras específicas",
     "Add at least one keyword in section 2.": "Adicione pelo menos uma palavra-chave na seção 2.",
     "Add your link or reward in section 4.": "Adicione seu link ou recompensa na seção 4.",
+    "Active now": "Ativo agora",
     "All campaigns": "Todas as campanhas",
     "An opening DM": "Uma DM de abertura",
     "And then, they will get": "Depois, a pessoa recebe",
