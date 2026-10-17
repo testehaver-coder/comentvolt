@@ -319,8 +319,12 @@ textarea { resize: vertical; min-height: 66px; }
 .ig-composer .cam svg { width: 16px; height: 16px; color: #fff; }
 
 
-.builder-topbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
-.builder-topbar input.name { max-width: 320px; font-weight: 600; }
+.builder-topbar { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
+.builder-topbar input.name { font-weight: 600; min-width: 200px; }
+.builder-topbar > .spacer { flex: 1; }
+.builder-topbar select { min-width: 140px; }
+.builder-topbar .status-pill { white-space: nowrap; }
+.builder-topbar .folder-field { white-space: nowrap; }
 .status-pill { padding: 4px 11px; border-radius: 999px; font-size: 12px; font-weight: 600; }
 .status-pill.live { background: var(--accent-soft); color: var(--accent-text); }
 .status-pill.stopped { background: var(--line); color: var(--ink-soft); }
