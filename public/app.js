@@ -852,6 +852,7 @@ function defaultDraft() {
       delivery: c.delivery,
     },
     followup: { enabled: false, delay_minutes: 60, text: c.followup },
+    recommendation: { enabled: false, delay_minutes: 60, message: "", button_label: "", link: "" },
     active: false,
   };
 }
@@ -873,6 +874,7 @@ function draftFromCampaign(c) {
     reward: c.reward || { type: "link", value: "" },
     copy: Object.assign(defaultDraft().copy, c.copy || {}),
     followup: Object.assign(defaultDraft().followup, c.followup || {}),
+    recommendation: Object.assign(defaultDraft().recommendation, c.recommendation || {}),
     active: !!c.active,
   };
 }
@@ -1121,6 +1123,14 @@ function renderSections() {
         <label class="field"><span class="label">Reminder message</span><textarea id="c_followup_message" data-max="1000">${esc(d.copy.followup_message || "")}</textarea></label>
         <label class="field"><span class="label">Reminder button name</span><input type="text" id="c_followup_button" maxlength="30" data-max="30" value="${esc(d.copy.followup_button || "")}"/></label>
       </div>
+      ${toggle("rec_enabled", d.recommendation.enabled, "Recommendation DM (suggest another product)", "Goes to people who completed the funnel. Sent after a delay to suggest something else.")}
+      <div id="rec_wrap" style="${d.recommendation.enabled ? "" : "display:none"}">
+        <label class="field"><span class="label">Send it after</span>
+          <select id="rec_delay">${FOLLOWUP_DELAYS.map((m) => `<option value="${m}" ${m === d.recommendation.delay_minutes ? "selected" : ""}>${delayLabel(m)}</option>`).join("")}</select></label>
+        <label class="field"><span class="label">Recommendation message</span><textarea id="c_recommendation_message" data-max="1000">${esc(d.recommendation.message || "")}</textarea></label>
+        <label class="field"><span class="label">Recommendation button name</span><input type="text" id="c_recommendation_button" maxlength="30" data-max="30" value="${esc(d.recommendation.button_label || "")}"/></label>
+        <label class="field"><span class="label">Recommendation link (optional)</span><input type="url" id="c_recommendation_link" maxlength="500" data-max="500" value="${esc(d.recommendation.link || "")}"/></label>
+      </div>
     </div>
 
     <div class="card" id="sec-features">
@@ -1256,6 +1266,11 @@ function wireSections() {
   bindText("fu_text", (v) => (d.followup.text = v));
   const delay = $("#fu_delay");
   if (delay) delay.onchange = (e) => (d.followup.delay_minutes = Number(e.target.value));
+  bindText("c_recommendation_message", (v) => (d.recommendation.message = v));
+  bindText("c_recommendation_button", (v) => (d.recommendation.button_label = v));
+  bindText("c_recommendation_link", (v) => (d.recommendation.link = v || undefined));
+  const recDelay = $("#rec_delay");
+  if (recDelay) recDelay.onchange = (e) => (d.recommendation.delay_minutes = Number(e.target.value));
 
   // Switching a step on or off shows it on the phone right away (its screen, its message).
   const bindToggle = (id, fn, wrapId) => {
@@ -1272,6 +1287,7 @@ function wireSections() {
   bindToggle("check_follow", (v) => (d.check_follow = v), "follow_wrap");
   bindToggle("ask_email", (v) => (d.ask_email = v), "email_wrap");
   bindToggle("fu_enabled", (v) => (d.followup.enabled = v), "fu_wrap");
+  bindToggle("rec_enabled", (v) => (d.recommendation.enabled = v), "rec_wrap");
 
   // Feature toggles (12 independent functions)
   $("#features-grid")?.querySelectorAll(".feature-toggle").forEach((toggle) => {

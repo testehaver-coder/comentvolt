@@ -84,6 +84,33 @@ export function validateCampaign(input: unknown, index = 0): Campaign {
     };
   }
 
+  let recommendation: Campaign["recommendation"];
+  if (c.recommendation !== undefined && c.recommendation !== null) {
+    const r = c.recommendation as Record<string, unknown>;
+    if (typeof r.enabled !== "boolean") {
+      throw new ConfigError(`${where}.recommendation.enabled must be a boolean`);
+    }
+    if (r.enabled) {
+      const delay = r.delay_minutes;
+      if (typeof delay !== "number" || !Number.isInteger(delay) || delay < FOLLOWUP_MIN_DELAY || delay > FOLLOWUP_MAX_DELAY) {
+        throw new ConfigError(`${where}.recommendation.delay_minutes must be a whole number from ${FOLLOWUP_MIN_DELAY} to ${FOLLOWUP_MAX_DELAY}`);
+      }
+      if (!isNonEmptyString(r.message)) {
+        throw new ConfigError(`${where}.recommendation.message is required when recommendation is enabled`);
+      }
+      if (!isNonEmptyString(r.button_label)) {
+        throw new ConfigError(`${where}.recommendation.button_label is required when recommendation is enabled`);
+      }
+    }
+    recommendation = {
+      enabled: r.enabled,
+      delay_minutes: typeof r.delay_minutes === "number" ? r.delay_minutes : 0,
+      message: typeof r.message === "string" ? r.message : "",
+      button_label: typeof r.button_label === "string" ? r.button_label : "",
+      link: typeof r.link === "string" ? r.link : undefined,
+    };
+  }
+
   let features: Campaign["features"];
   if (c.features !== undefined && c.features !== null) {
     const f = c.features as Record<string, unknown>;
@@ -133,6 +160,7 @@ export function validateCampaign(input: unknown, index = 0): Campaign {
       followup_button: optionalString(copy.followup_button),
     },
     ...(followup ? { followup } : {}),
+    ...(recommendation ? { recommendation } : {}),
     ...(features ? { features } : {}),
   };
 }

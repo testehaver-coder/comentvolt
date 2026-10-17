@@ -63,6 +63,19 @@ export interface FollowupConfig {
   text: string;
 }
 
+/** Recommendation for people who completed the funnel (see engine.sendDueRecommendations). */
+export interface RecommendationConfig {
+  enabled: boolean;
+  /** Minutes after initial button click; 5 to 1380 (23 h), inside Instagram's 24-hour messaging window. */
+  delay_minutes: number;
+  /** The recommendation message; customizable text to suggest another product/service. */
+  message: string;
+  /** Button label for the recommendation (customizable, up to 30 chars). */
+  button_label: string;
+  /** Optional link or URL for the recommendation. */
+  link?: string;
+}
+
 export interface RewardConfig {
   type: "link" | "code" | "text";
   value: string;
@@ -150,6 +163,8 @@ export interface Campaign {
   reward: RewardConfig;
   copy: CampaignCopy;
   followup?: FollowupConfig;
+  /** Recommendation (upsell) DM for people who completed the funnel. */
+  recommendation?: RecommendationConfig;
   /** Modular feature toggles (12 independent functions). All default to true for backwards compatibility. */
   features?: Partial<FeatureFlags>;
 }

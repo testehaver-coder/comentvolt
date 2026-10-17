@@ -252,6 +252,11 @@
     "Email Collection": "Coleta de e-mail",
     "Ask for email": "Pedir e-mail",
     "Request email via Instagram chip": "Peça e-mail via botão do Instagram",
+    "Recommendation DM (suggest another product)": "DM de recomendação (sugerir outro produto)",
+    "Goes to people who completed the funnel. Sent after a delay to suggest something else.": "Vai para quem completou o funil. Enviada com atraso para sugerir outra coisa.",
+    "Recommendation message": "Mensagem de recomendação",
+    "Recommendation button name": "Nome do botão de recomendação",
+    "Recommendation link (optional)": "Link de recomendação (opcional)",
   };
 
   const plural = (n, one, many) => (n === "1" ? one : many);
