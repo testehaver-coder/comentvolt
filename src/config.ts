@@ -6,6 +6,10 @@ import type { AppConfig, Campaign } from "./types";
 
 export class ConfigError extends Error {}
 
+/** Follow-up delay bounds, in minutes: at least 5, at most 23 h (inside Instagram's 24 h window). */
+export const FOLLOWUP_MIN_DELAY = 5;
+export const FOLLOWUP_MAX_DELAY = 23 * 60;
+
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.trim().length > 0;
 }
@@ -24,8 +28,9 @@ export function validateCampaign(input: unknown, index = 0): Campaign {
   if (!isNonEmptyString(c.media_id)) {
     throw new ConfigError(`${where}.media_id is required`);
   }
-  if (!Array.isArray(c.keywords) || c.keywords.length === 0 || !c.keywords.every(isNonEmptyString)) {
-    throw new ConfigError(`${where}.keywords must be a non-empty array of strings`);
+  const matchAny = c.match_any === true;
+  if (!Array.isArray(c.keywords) || !c.keywords.every(isNonEmptyString) || (!matchAny && c.keywords.length === 0)) {
+    throw new ConfigError(`${where}.keywords must be a non-empty array of strings (or set match_any)`);
   }
   if (c.exclude !== undefined && (!Array.isArray(c.exclude) || !c.exclude.every(isNonEmptyString))) {
     throw new ConfigError(`${where}.exclude must be an array of strings`);
@@ -55,12 +60,51 @@ export function validateCampaign(input: unknown, index = 0): Campaign {
     }
   }
 
+  let followup: Campaign["followup"];
+  if (c.followup !== undefined && c.followup !== null) {
+    const f = c.followup as Record<string, unknown>;
+    if (typeof f.enabled !== "boolean") {
+      throw new ConfigError(`${where}.followup.enabled must be a boolean`);
+    }
+    if (f.enabled) {
+      const delay = f.delay_minutes;
+      // Instagram allows the follow-up only within 24 h of the person's last interaction (the tap
+      // that led to delivery), so it must land inside that window with margin to spare.
+      if (typeof delay !== "number" || !Number.isInteger(delay) || delay < FOLLOWUP_MIN_DELAY || delay > FOLLOWUP_MAX_DELAY) {
+        throw new ConfigError(`${where}.followup.delay_minutes must be a whole number from ${FOLLOWUP_MIN_DELAY} to ${FOLLOWUP_MAX_DELAY}`);
+      }
+      if (!isNonEmptyString(f.text)) {
+        throw new ConfigError(`${where}.followup.text is required when the follow-up is enabled`);
+      }
+    }
+    followup = {
+      enabled: f.enabled,
+      delay_minutes: typeof f.delay_minutes === "number" ? f.delay_minutes : 0,
+      text: typeof f.text === "string" ? f.text : "",
+    };
+  }
+
+  let features: Campaign["features"];
+  if (c.features !== undefined && c.features !== null) {
+    const f = c.features as Record<string, unknown>;
+    // Normalize: keep only boolean values, drop anything else so it falls back to the default (true).
+    const normalized: Record<string, boolean> = {};
+    for (const [key, value] of Object.entries(f)) {
+      if (typeof value === "boolean") {
+        normalized[key] = value;
+      }
+    }
+    features = normalized;
+  }
+
   // Reflect only known fields; ignore extras so the schema can evolve.
   return {
     campaign_id: c.campaign_id,
     name: typeof c.name === "string" ? c.name : undefined,
+    folder: isNonEmptyString(c.folder) ? c.folder.trim().slice(0, 60) : undefined,
     media_id: c.media_id,
     keywords: c.keywords as string[],
+    match_any: matchAny,
     exclude: (c.exclude as string[] | undefined) ?? [],
     public_reply: c.public_reply as Campaign["public_reply"],
     like_comment: Boolean(c.like_comment),
@@ -79,9 +123,17 @@ export function validateCampaign(input: unknown, index = 0): Campaign {
       opening_button: optionalString(copy.opening_button),
       follow_gate: optionalString(copy.follow_gate),
       follow_button: optionalString(copy.follow_button),
+      follow_profile_button: optionalString(copy.follow_profile_button),
+      follow_profile_url: optionalString(copy.follow_profile_url),
       email_ask: optionalString(copy.email_ask),
       delivery: copy.delivery,
+      delivery_button: optionalString(copy.delivery_button),
+      delivery_url: optionalString(copy.delivery_url),
+      followup_message: optionalString(copy.followup_message),
+      followup_button: optionalString(copy.followup_button),
     },
+    ...(followup ? { followup } : {}),
+    ...(features ? { features } : {}),
   };
 }
 

@@ -30,7 +30,56 @@ const store = {
   archiveCampaigns: [],
   archiveSearch: "",
   mediaShowAll: false,
+  // Builder: which preview bubble mirrors the focused field, and the post picked before "any post".
+  previewFocus: null,
+  lastMediaId: "",
+  // Automations list: folder filter ("" = all) and list/grid view (remembered in this browser).
+  autoFolder: "",
+  autoView: (() => {
+    try {
+      return localStorage.getItem("chatmany_view") === "grid" ? "grid" : "list";
+    } catch {
+      return "list";
+    }
+  })(),
 };
+
+/* ---------------- embedding + theme + language ----------------
+   Postiz shows this UI on its Automations page as ?embed=1&theme=dark|light&lang=<code> and
+   posts { type: "postiz:theme", theme } / { type: "postiz:language", language } to this frame
+   whenever its light/dark switch or language changes. Templates stay in English; i18n.js
+   translates what is rendered (see there). */
+const params = new URLSearchParams(location.search);
+const i18n = window.chatmanyI18n;
+i18n.setLanguage(params.get("lang") || navigator.language);
+const EMBEDDED = params.get("embed") === "1";
+const THEMES = ["dark", "light"];
+// Instagram refuses to render inside a frame, so when embedded the connect flow opens a new tab.
+const CONNECT_TARGET = EMBEDDED ? ' target="_blank" rel="noopener"' : "";
+
+function applyTheme(theme) {
+  if (THEMES.includes(theme)) document.documentElement.dataset.theme = theme;
+}
+
+// Postiz passes a short-lived single sign-on ticket in the fragment (#sso=...), which never
+// reaches a server log or Referer. Read it once and drop it from the address right away.
+const SSO_TICKET = new URLSearchParams(location.hash.slice(1)).get("sso") || "";
+if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+
+applyTheme(params.get("theme") || "dark");
+i18n.watch(document.body);
+if (EMBEDDED) {
+  document.body.classList.add("embedded");
+  window.addEventListener("message", (e) => {
+    if (e.source !== window.parent || !e.data) return;
+    if (e.data.type === "postiz:theme") applyTheme(e.data.theme);
+    if (e.data.type === "postiz:language" && i18n.setLanguage(e.data.language) !== undefined) {
+      // Re-render from the English templates so the new language applies everywhere.
+      if (store.status) renderApp();
+      else if (!store.token) renderSignedOut();
+    }
+  });
+}
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const el = (html) => {
@@ -52,7 +101,8 @@ async function api(path, { method = "GET", body } = {}) {
   if (res.status === 401) {
     store.token = "";
     localStorage.removeItem(TOKEN_KEY);
-    renderLogin("Session token was rejected. Enter it again.");
+    if (EMBEDDED) renderSignedOut();
+    else renderLogin("Session token was rejected. Enter it again.");
     throw new Error("unauthorized");
   }
   const ct = res.headers.get("content-type") || "";
@@ -62,7 +112,7 @@ async function api(path, { method = "GET", body } = {}) {
 }
 
 function toast(msg, isErr = false) {
-  const t = el(`<div class="toast ${isErr ? "err" : ""}">${esc(msg)}</div>`);
+  const t = el(`<div class="toast ${isErr ? "err" : ""}">${esc(i18n.t(msg))}</div>`);
   document.body.appendChild(t);
   requestAnimationFrame(() => t.classList.add("show"));
   setTimeout(() => {
@@ -93,13 +143,60 @@ const ICON = {
 
 /* ---------------- boot ---------------- */
 async function boot() {
-  if (!store.token) return renderLogin();
+  if (SSO_TICKET) await signInWithPostiz(SSO_TICKET);
+  if (!store.token) return EMBEDDED ? renderSignedOut() : renderLogin();
   try {
     store.status = await api("/api/status");
   } catch {
     return; // renderLogin already shown on 401
   }
   renderApp();
+}
+
+// Embedded, Instagram is connected in another tab; pick the new connection up when the owner
+// comes back. Only while disconnected, so a re-render never discards an in-progress draft.
+if (EMBEDDED) {
+  window.addEventListener("focus", async () => {
+    if (!store.token || (store.status && store.status.connected)) return;
+    try {
+      store.status = await api("/api/status");
+      if (store.status.connected) renderApp();
+    } catch {
+      /* 401 handled */
+    }
+  });
+}
+
+/** Trade Postiz's ticket for a session token; on failure keep whatever token was stored. */
+async function signInWithPostiz(ticket) {
+  try {
+    const res = await fetch("/auth/sso", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticket }),
+    });
+    if (!res.ok) return;
+    const { token } = await res.json();
+    if (!token) return;
+    store.token = token;
+    localStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    /* network error: fall through to the stored token, if any */
+  }
+}
+
+/**
+ * Embedded in Postiz there is no owner-token form: Postiz signs the owner in. When that fails
+ * (single sign-on not configured, or a session that expired), say how to get back in.
+ */
+function renderSignedOut() {
+  document.title = "chatmany";
+  $("#app").innerHTML = `
+    <div class="gate-wrap"><div class="gate-card">
+      <div class="gate-icon">${ICON.spark}</div>
+      <h2>Couldn't sign you in</h2>
+      <p>Reload this page in Postiz to sign in again. If it keeps happening, check that CHATMANY_SSO_SECRET in Postiz matches POSTIZ_SSO_SECRET in chatmany.</p>
+    </div></div>`;
 }
 
 /* ---------------- login / connect ---------------- */
@@ -155,7 +252,7 @@ function renderApp() {
         </nav>
         <div class="sidebar-footer">
           <div class="profile">
-            <img class="avatar" src="${s.profile_picture_url || ""}" alt="" onerror="this.style.visibility='hidden'"/>
+            <img class="avatar" src="${esc(s.profile_picture_url || "")}" alt="" onerror="this.style.visibility='hidden'"/>
             <div class="who">
               <div class="handle">${s.connected ? "@" + esc(s.username || "account") : "Not connected"}</div>
               <span class="tag">self-hosted</span>
@@ -194,11 +291,34 @@ function authorizeUrl() {
   return `/auth/authorize?token=${encodeURIComponent(store.token)}`;
 }
 
+// When Postiz manages Instagram (status.managed_by === "postiz") the connect step lives there:
+// Add Channel -> Instagram (Standalone) on its calendar page, at the address /api/status reports.
+function postizManaged() {
+  return (store.status || {}).managed_by === "postiz";
+}
+
+function postizChannelsUrl() {
+  try {
+    const base = (store.status || {}).postiz_url;
+    return base ? `${new URL(base).origin}/launches` : "";
+  } catch {
+    return "";
+  }
+}
+
+function connectLink(attrs = "") {
+  if (!postizManaged()) return `<a ${attrs} href="${authorizeUrl()}"${CONNECT_TARGET}>Connect Instagram</a>`;
+  const href = postizChannelsUrl();
+  return href
+    ? `<a ${attrs} href="${esc(href)}" target="${EMBEDDED ? "_top" : "_blank"}" rel="noopener">Connect Instagram in Postiz</a>`
+    : `<span>Connect it in Postiz: Add Channel → Instagram (Standalone)</span>`;
+}
+
 function connectBanner() {
   const s = store.status || {};
   if (s.connected && !s.token_expired) return "";
   const msg = s.connected && s.token_expired ? "Your Instagram token expired — reconnect to resume." : "No Instagram account connected yet.";
-  return `<div class="banner">${msg} <a href="${authorizeUrl()}">Connect Instagram</a></div>`;
+  return `<div class="banner">${msg} ${connectLink()}</div>`;
 }
 
 /**
@@ -213,8 +333,12 @@ function renderConnectGate(view, what) {
       <div class="gate-icon">${ICON.send}</div>
       <h2>Connect Instagram first</h2>
       <p>${esc(what)} need a connected Instagram Professional account — there's nothing for an automation to watch or send until one is linked.</p>
-      <a class="btn primary" href="${authorizeUrl()}">Connect Instagram</a>
-      <p class="gate-hint">You'll approve access on Instagram's own page. chatmany never sees your password.</p>
+      ${connectLink('class="btn primary"')}
+      <p class="gate-hint">${
+        postizManaged()
+          ? "Connect it once in Postiz (Add Channel → Instagram (Standalone)); it's used here automatically."
+          : "You'll approve access on Instagram's own page. chatmany never sees your password."
+      }</p>
     </div></div>`;
 }
 
@@ -255,7 +379,7 @@ function openInBuilder(campaign) {
 async function deleteCampaigns(ids) {
   if (ids.length === 0) return;
   const label = ids.length === 1 ? "this automation" : `these ${ids.length} automations`;
-  if (!confirm(`Delete ${label}? This can't be undone.`)) return;
+  if (!confirm(i18n.t(`Delete ${label}? This can't be undone.`))) return;
   try {
     await Promise.all(ids.map((id) => api("/api/campaigns/delete", { method: "POST", body: { campaign_id: id } })));
     store.selectedAutomations.clear();
@@ -318,6 +442,7 @@ async function renderAutomations() {
     }),
   );
   store.automationStats = Object.fromEntries(statsEntries);
+  if (store.autoFolder && !allFolders().includes(store.autoFolder)) store.autoFolder = "";
 
   view.innerHTML = `
     ${connectBanner()}
@@ -337,13 +462,32 @@ async function renderAutomations() {
       <button class="folder-btn" id="newfolder">${ICON.folder} New folder</button>
       <button class="trash-link" id="trashlink">${ICON.archive} Archive</button>
     </div>
-    <div class="automations-row3"><button class="grid-link" id="gridlink">${ICON.grid} View as grid</button></div>
+    <div class="folder-chips" id="folderchips"></div>
+    <div class="automations-row3"><button class="grid-link" id="gridlink">${ICON.grid} <span>${
+      store.autoView === "grid" ? "View as list" : "View as grid"
+    }</span></button></div>
     <div id="autolist"></div>`;
 
   $("#newauto").onclick = () => openInBuilder(null);
-  $("#newfolder").onclick = () => toast("Folders are coming soon");
+  $("#newfolder").onclick = () => {
+    const name = (prompt(i18n.t("Folder name")) || "").trim().slice(0, 60);
+    if (!name) return;
+    saveExtraFolders([...extraFolders(), name]);
+    store.autoFolder = name;
+    paintFolderChips();
+    paintAutoList();
+  };
   $("#trashlink").onclick = () => { store.page = "archive"; paintNav(); route(); };
-  $("#gridlink").onclick = () => toast("Grid view is coming soon");
+  $("#gridlink").onclick = () => {
+    store.autoView = store.autoView === "grid" ? "list" : "grid";
+    try {
+      localStorage.setItem(VIEW_KEY, store.autoView);
+    } catch {
+      /* the choice just won't be remembered */
+    }
+    $("#gridlink span").textContent = store.autoView === "grid" ? "View as list" : "View as grid";
+    paintAutoList();
+  };
   $("#autotrigger").onchange = () => {}; // only one trigger type exists today (comment); reserved for future triggers
   $("#autosearch").oninput = (e) => {
     store.automationsSearch = e.target.value;
@@ -354,7 +498,83 @@ async function renderAutomations() {
     paintAutoList();
   };
 
+  paintFolderChips();
   paintAutoList();
+}
+
+/* ---------------- folders ----------------
+   A folder is just a name on the campaign (campaign.folder). Folders created here before anything
+   is filed in them are remembered in this browser until an automation uses them. */
+const FOLDERS_KEY = "chatmany_folders";
+const VIEW_KEY = "chatmany_view";
+
+function extraFolders() {
+  try {
+    const list = JSON.parse(localStorage.getItem(FOLDERS_KEY) || "[]");
+    return Array.isArray(list) ? list.filter((f) => typeof f === "string" && f) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveExtraFolders(list) {
+  try {
+    localStorage.setItem(FOLDERS_KEY, JSON.stringify([...new Set(list)]));
+  } catch {
+    /* not remembered across reloads; the folder still works for this session */
+  }
+}
+
+function allFolders() {
+  const used = store.campaigns.map((c) => c.folder).filter(Boolean);
+  return [...new Set([...used, ...extraFolders()])].sort((a, b) => a.localeCompare(b));
+}
+
+function paintFolderChips() {
+  const box = $("#folderchips");
+  if (!box) return;
+  const folders = allFolders();
+  if (!folders.length) {
+    box.innerHTML = "";
+    return;
+  }
+  const count = (f) => store.campaigns.filter((c) => (c.folder || "") === f).length;
+  const chip = (value, label, n) =>
+    `<button class="folder-chip ${store.autoFolder === value ? "active" : ""}" data-folder="${esc(value)}">${value ? ICON.folder : ""}<span>${esc(label)}</span><span class="n">${n}</span></button>`;
+  box.innerHTML = chip("", "All", store.campaigns.length) + folders.map((f) => chip(f, f, count(f))).join("");
+  box.querySelectorAll(".folder-chip").forEach((b) => {
+    b.onclick = () => {
+      store.autoFolder = b.dataset.folder;
+      paintFolderChips();
+      paintAutoList();
+    };
+  });
+}
+
+/** File the given automations under `folder` ("" = no folder). */
+async function moveToFolder(ids, folder) {
+  try {
+    await Promise.all(
+      ids.map((id) => {
+        const c = store.campaigns.find((x) => x.campaign_id === id);
+        if (!c) return null;
+        return api("/api/campaigns", { method: "POST", body: { campaign: { ...c, folder: folder || undefined }, active: !!c.active } });
+      }),
+    );
+    store.selectedAutomations.clear();
+    toast(folder ? "Moved to folder" : "Removed from folder");
+    renderAutomations();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/** What fires the automation, in words: which post, which words. */
+function triggerSummary(c) {
+  const anyPost = c.media_id === ANY_MEDIA;
+  const thumb = anyPost ? "" : (store.media.find((m) => m.id === c.media_id) || {}).thumbnail_url || "";
+  const words = c.match_any ? "any word" : (c.keywords || [])[0] || "—";
+  return { anyPost, thumb, words };
 }
 
 function paintAutoList() {
@@ -365,6 +585,7 @@ function paintAutoList() {
     if (q && !(c.name || c.campaign_id).toLowerCase().includes(q)) return false;
     if (store.automationsState === "live" && !c.active) return false;
     if (store.automationsState === "stopped" && c.active) return false;
+    if (store.autoFolder && (c.folder || "") !== store.autoFolder) return false;
     return true;
   });
 
@@ -384,49 +605,92 @@ function paintAutoList() {
 
   box.innerHTML = "";
   if (n > 0) {
+    const folders = allFolders();
     box.appendChild(
       el(`<div class="bulk-bar"><span>${n} selected</span><div class="spacer"></div>
+        <select id="bulkfolder" class="bulk-folder"><option value="">Move to folder…</option>${folders
+          .map((f) => `<option value="${esc(f)}">${esc(f)}</option>`)
+          .join("")}<option value="__none">No folder</option><option value="__new">New folder…</option></select>
         <button class="btn ghost sm" id="bulkarchive">${ICON.archive} Archive</button>
         <button class="btn danger sm" id="bulkdelete">${ICON.trash} Delete</button>
         <button class="btn ghost sm" id="bulkcancel">Cancel</button></div>`),
     );
   }
-  box.appendChild(
-    el(`<div class="auto-list-head"><span></span><span>Name ▾</span><span>Runs</span><span>CTR</span><span>Modified ▾</span></div>`),
-  );
-  rows.forEach((c) => {
-    const thumb = (store.media.find((m) => m.id === c.media_id) || {}).thumbnail_url || "";
-    const stats = store.automationStats[c.campaign_id] || { runs: 0, ctr: 0 };
-    const kw = (c.keywords || [])[0] || "—";
-    const checked = store.selectedAutomations.has(c.campaign_id);
-    const row = el(`
-      <div class="auto-row ${checked ? "selected" : ""}" data-id="${esc(c.campaign_id)}">
-        <input type="checkbox" ${checked ? "checked" : ""}/>
-        <div class="auto-name-cell">
-          <div class="auto-name-line">
-            <span class="status-pill ${c.active ? "live" : "stopped"}">${c.active ? "live" : "stopped"}</span>
-            <span class="auto-name">${esc(c.name || c.campaign_id)}</span>
-          </div>
-          <div class="auto-trigger">
-            ${thumb ? `<img src="${esc(thumb)}" alt=""/>` : ""}
-            <span>User comments and comment contains</span>
-            <span class="kw-pill">${esc(kw)}</span>
-          </div>
-        </div>
-        <div><span class="num">${stats.runs}</span></div>
-        <div><span class="num">${stats.runs > 0 ? stats.ctr + "%" : "n/a"}</span></div>
-        <div class="muted">${timeAgo(c.updated_at)}</div>
-      </div>`);
-    row.querySelector('input[type="checkbox"]').onclick = (e) => {
-      e.stopPropagation();
-      if (e.target.checked) store.selectedAutomations.add(c.campaign_id);
-      else store.selectedAutomations.delete(c.campaign_id);
-      paintAutoList();
-    };
-    row.onclick = () => openInBuilder(c);
-    box.appendChild(row);
-  });
 
+  if (store.autoView === "grid") {
+    const grid = el(`<div class="auto-grid"></div>`);
+    rows.forEach((c) => {
+      const { anyPost, thumb, words } = triggerSummary(c);
+      const stats = store.automationStats[c.campaign_id] || { runs: 0, ctr: 0 };
+      const card = el(`
+        <div class="auto-card" data-id="${esc(c.campaign_id)}" tabindex="0">
+          <div class="auto-card-media">
+            ${thumb ? `<img src="${esc(thumb)}" alt=""/>` : `<div class="placeholder">${anyPost ? ICON.grid : ICON.automations}<span>${anyPost ? "Any post or reel" : ""}</span></div>`}
+            <span class="status-pill ${c.active ? "live" : "stopped"}">${c.active ? "live" : "stopped"}</span>
+          </div>
+          <div class="auto-card-body">
+            <div class="auto-name">${esc(c.name || c.campaign_id)}</div>
+            <div class="auto-trigger"><span class="kw-pill">${esc(words)}</span>${c.folder ? `<span class="folder-tag">${ICON.folder}${esc(c.folder)}</span>` : ""}</div>
+            <div class="auto-card-stats"><span><b>${stats.runs}</b> Runs</span><span><b>${stats.runs > 0 ? stats.ctr + "%" : "n/a"}</b> CTR</span></div>
+          </div>
+        </div>`);
+      card.onclick = () => openInBuilder(c);
+      card.onkeydown = (e) => e.key === "Enter" && openInBuilder(c);
+      grid.appendChild(card);
+    });
+    box.appendChild(grid);
+  } else {
+    box.appendChild(
+      el(`<div class="auto-list-head"><span></span><span>Name ▾</span><span>Runs</span><span>CTR</span><span>Modified ▾</span></div>`),
+    );
+    rows.forEach((c) => {
+      const { anyPost, thumb, words } = triggerSummary(c);
+      const stats = store.automationStats[c.campaign_id] || { runs: 0, ctr: 0 };
+      const checked = store.selectedAutomations.has(c.campaign_id);
+      const row = el(`
+        <div class="auto-row ${checked ? "selected" : ""}" data-id="${esc(c.campaign_id)}">
+          <input type="checkbox" ${checked ? "checked" : ""}/>
+          <div class="auto-name-cell">
+            <div class="auto-name-line">
+              <span class="status-pill ${c.active ? "live" : "stopped"}">${c.active ? "live" : "stopped"}</span>
+              <span class="auto-name">${esc(c.name || c.campaign_id)}</span>
+              ${c.folder && !store.autoFolder ? `<span class="folder-tag">${ICON.folder}${esc(c.folder)}</span>` : ""}
+            </div>
+            <div class="auto-trigger">
+              ${anyPost ? `<span class="any-pill">${ICON.grid}<span>Any post or reel</span></span>` : thumb ? `<img src="${esc(thumb)}" alt=""/>` : ""}
+              <span>User comments and comment contains</span>
+              <span class="kw-pill">${esc(words)}</span>
+            </div>
+          </div>
+          <div><span class="num">${stats.runs}</span></div>
+          <div><span class="num">${stats.runs > 0 ? stats.ctr + "%" : "n/a"}</span></div>
+          <div class="muted">${timeAgo(c.updated_at)}</div>
+        </div>`);
+      row.querySelector('input[type="checkbox"]').onclick = (e) => {
+        e.stopPropagation();
+        if (e.target.checked) store.selectedAutomations.add(c.campaign_id);
+        else store.selectedAutomations.delete(c.campaign_id);
+        paintAutoList();
+      };
+      row.onclick = () => openInBuilder(c);
+      box.appendChild(row);
+    });
+  }
+
+  const bulkFolder = $("#bulkfolder");
+  if (bulkFolder) {
+    bulkFolder.onchange = (e) => {
+      const ids = [...store.selectedAutomations];
+      let folder = e.target.value;
+      if (!folder) return;
+      if (folder === "__new") {
+        folder = (prompt(i18n.t("Folder name")) || "").trim().slice(0, 60);
+        if (!folder) return (e.target.value = "");
+        saveExtraFolders([...extraFolders(), folder]);
+      }
+      moveToFolder(ids, folder === "__none" ? "" : folder);
+    };
+  }
   const bulkArchive = $("#bulkarchive");
   if (bulkArchive) bulkArchive.onclick = (e) => { e.stopPropagation(); archiveCampaigns([...store.selectedAutomations], true); };
   const bulkDelete = $("#bulkdelete");
@@ -515,7 +779,7 @@ function paintArchiveList() {
 
 /** Permanently delete an archived campaign, then refresh the archive list. */
 async function deleteFromArchive(id) {
-  if (!confirm("Permanently delete this automation? This can't be undone.")) return;
+  if (!confirm(i18n.t("Permanently delete this automation? This can't be undone."))) return;
   try {
     await api("/api/campaigns/delete", { method: "POST", body: { campaign_id: id } });
     toast("Automation permanently deleted");
@@ -526,27 +790,67 @@ async function deleteFromArchive(id) {
 }
 
 /* ================= CREATE (builder) ================= */
+// Starter copy for a new automation. These are the messages followers receive, so they are
+// written in the UI language up front (never translated on screen, unlike the rest of the UI).
+const DEFAULT_COPY = {
+  en: {
+    name: "My automation",
+    keyword: "Link",
+    public_replies: ["Sent you a DM! 📩", "Check your DMs 👀"],
+    opening: "Hey! Tap below to grab the link 👇",
+    opening_button: "Send it to me",
+    follow_gate: "Make sure you're following so you don't miss the next one 🙌 Not following yet? Follow, then tap below.",
+    follow_button: "✅ I followed",
+    email_ask: "Want it in your inbox too? Tap your email or reply with it.",
+    delivery: "Here you go 🎉 {reward}",
+    followup: "Did you catch it? Here's your link again 👉 {reward}",
+  },
+  pt: {
+    name: "Minha automação",
+    keyword: "Link",
+    public_replies: ["Te mandei uma DM! 📩", "Confere sua DM 👀"],
+    opening: "Oi! Toca no botão abaixo pra receber o link 👇",
+    opening_button: "Quero receber",
+    follow_gate: "Me segue pra não perder as próximas 🙌 Ainda não segue? Segue e depois toca abaixo.",
+    follow_button: "✅ Já sigo",
+    email_ask: "Quer receber no e-mail também? Toca no seu e-mail ou responde com ele.",
+    delivery: "Aqui está 🎉 {reward}",
+    followup: "Viu o link? Tá aqui de novo 👉 {reward}",
+  },
+};
+
+/** "Any post or reel" (must match ANY_MEDIA in src/types.ts). */
+const ANY_MEDIA = "*";
+
+/** Follow-up delays offered in the builder, in minutes — all inside Instagram's 24 h window. */
+const FOLLOWUP_DELAYS = [15, 30, 60, 120, 240, 480, 720, 1380];
+const delayLabel = (min) => (min < 60 ? `${min} min` : `${min / 60} h`);
+
 function defaultDraft() {
+  const c = DEFAULT_COPY[i18n.language()] || DEFAULT_COPY.en;
   return {
     campaign_id: "",
-    name: "My automation",
+    name: c.name,
     media_id: "",
     media_thumb: "",
-    keywords: ["Link"],
+    folder: "",
+    keywords: [c.keyword],
+    match_any: false,
     exclude: [],
-    public_reply: { enabled: false, texts: ["Sent you a DM! 📩", "Check your DMs 👀"] },
+    public_reply: { enabled: false, texts: [...c.public_replies] },
     opening_enabled: true,
     check_follow: false,
     ask_email: false,
     reward: { type: "link", value: "" },
     copy: {
-      opening: "Hey! Tap below to grab the link 👇",
-      opening_button: "Send it to me",
-      follow_gate: "Make sure you're following so you don't miss the next one 🙌 Not following yet? Follow, then tap below.",
-      follow_button: "✅ I followed",
-      email_ask: "Want it in your inbox too? Tap your email or reply with it.",
-      delivery: "Here you go 🎉 {reward}",
+      opening: c.opening,
+      opening_button: c.opening_button,
+      follow_gate: c.follow_gate,
+      follow_button: c.follow_button,
+      email_ask: c.email_ask,
+      delivery: c.delivery,
     },
+    followup: { enabled: false, delay_minutes: 60, text: c.followup },
     active: false,
   };
 }
@@ -557,7 +861,9 @@ function draftFromCampaign(c) {
     name: c.name || c.campaign_id,
     media_id: c.media_id,
     media_thumb: (store.media.find((m) => m.id === c.media_id) || {}).thumbnail_url || "",
+    folder: c.folder || "",
     keywords: c.keywords || [],
+    match_any: !!c.match_any,
     exclude: c.exclude || [],
     public_reply: c.public_reply || { enabled: false, texts: ["Sent you a DM! 📩"] },
     opening_enabled: true,
@@ -565,6 +871,7 @@ function draftFromCampaign(c) {
     ask_email: !!c.ask_email,
     reward: c.reward || { type: "link", value: "" },
     copy: Object.assign(defaultDraft().copy, c.copy || {}),
+    followup: Object.assign(defaultDraft().followup, c.followup || {}),
     active: !!c.active,
   };
 }
@@ -595,6 +902,8 @@ async function renderCreate() {
     <div class="builder-topbar">
       <input class="name" id="cname" value="${esc(d.name)}" />
       <span class="status-pill ${d.active ? "live" : "stopped"}" id="statuspill">${d.active ? "live" : "stopped"}</span>
+      <span class="folder-field">${ICON.folder}<input id="cfolder" list="folderlist" value="${esc(d.folder)}" placeholder="No folder"/></span>
+      <datalist id="folderlist">${allFolders().map((f) => `<option value="${esc(f)}"></option>`).join("")}</datalist>
       <div class="spacer"></div>
       <select id="loadsel" style="width:auto"><option value="">New automation…</option>${store.campaigns
         .map((c) => `<option value="${esc(c.campaign_id)}" ${c.campaign_id === d.campaign_id ? "selected" : ""}>${esc(c.name || c.campaign_id)}</option>`)
@@ -605,6 +914,7 @@ async function renderCreate() {
     </div>`);
   view.appendChild(top);
 
+  view.appendChild(el(`<div id="issues"></div>`));
   const split = el(`<div class="builder"><div class="sections" id="sections"></div><div class="preview-col" id="previewcol"></div></div>`);
   view.appendChild(split);
 
@@ -614,6 +924,9 @@ async function renderCreate() {
 
   $("#cname").oninput = (e) => {
     d.name = e.target.value;
+  };
+  $("#cfolder").oninput = (e) => {
+    d.folder = e.target.value.trim();
   };
   $("#loadsel").onchange = (e) => {
     const id = e.target.value;
@@ -635,7 +948,7 @@ async function renderCreate() {
   const deleteBtn = $("#deletebtn");
   if (deleteBtn) {
     deleteBtn.onclick = async () => {
-      if (!confirm(`Delete "${d.name || d.campaign_id}"? This can't be undone.`)) return;
+      if (!confirm(i18n.t(`Delete "${d.name || d.campaign_id}"? This can't be undone.`))) return;
       try {
         await api("/api/campaigns/delete", { method: "POST", body: { campaign_id: d.campaign_id } });
         toast("Automation deleted");
@@ -651,15 +964,63 @@ async function renderCreate() {
 
 function bindLive(root) {
   // re-render preview on any input change within the sections
-  root.addEventListener("input", renderPreview);
-  root.addEventListener("change", renderPreview);
+  // Assigned, not added: the sections re-render in place and must not stack a listener per render.
+  root.oninput = renderPreview;
+  root.onchange = renderPreview;
 }
 
 const MEDIA_ROW_SIZE = 5;
 
+/** Feature definitions for the 12 modular automation functions. Organized by flow stage. */
+const FEATURES_BY_STAGE = {
+  "Comment Detection": [
+    { id: "commentMonitoring", name: "Monitor for keywords", desc: "Watch comments for your keywords" },
+  ],
+  "Public Reply": [
+    { id: "publicReply", name: "Reply publicly", desc: "Post reply under the comment with @mention" },
+  ],
+  "Private Message Flow": [
+    { id: "initialDM", name: "Send opening DM", desc: "Private reply with button (starts the funnel)" },
+    { id: "initialButton", name: "Opening button", desc: "Button in the opening message" },
+  ],
+  "Follow Gate": [
+    { id: "followGate", name: "Ask to follow", desc: "Request user to follow before continuing" },
+    { id: "followButton", name: "Confirmation button", desc: "Show 'Already following' button" },
+    { id: "followVerification", name: "Verify via API", desc: "Check if they really followed" },
+    { id: "followRepeat", name: "Retry if not confirmed", desc: "Resend message if follow not verified" },
+  ],
+  "Reward Delivery": [
+    { id: "autoDelivery", name: "Send the link", desc: "Deliver final link/reward automatically" },
+    { id: "linkTracking", name: "Track clicks", desc: "Record when they open the link" },
+    { id: "reminderMessage", name: "Reminder after 24h", desc: "Follow-up DM if link never opened" },
+  ],
+  "Email Collection": [
+    { id: "emailCollection", name: "Ask for email", desc: "Request email via Instagram chip" },
+  ],
+};
+
+/** Render organized feature toggles. */
+function renderFeatureCards(campaign) {
+  const features = campaign.features || {};
+  let html = "";
+  for (const [stage, items] of Object.entries(FEATURES_BY_STAGE)) {
+    html += `<div class="feature-stage">
+      <div class="fs-title">${stage}</div>
+      <div class="fs-items">
+        ${items.map((f) => `<div class="feature-toggle-row">
+          <div><div class="ft-name">${f.name}</div><div class="ft-desc">${f.desc}</div></div>
+          <label class="switch"><input type="checkbox" class="feature-toggle" data-feature="${f.id}" ${features[f.id] !== false ? "checked" : ""}/><span class="slider"></span></label>
+        </div>`).join("")}
+      </div>
+    </div>`;
+  }
+  return html;
+}
+
 function renderSections() {
   const d = store.draft;
   const box = $("#sections");
+  const anyPost = d.media_id === ANY_MEDIA;
   const shownMedia = store.mediaShowAll ? store.media : store.media.slice(0, MEDIA_ROW_SIZE);
   const hasMore = store.media.length > MEDIA_ROW_SIZE;
   const mediaGrid =
@@ -670,37 +1031,52 @@ function renderSections() {
               <img src="${esc(m.thumbnail_url || m.media_url || "")}" alt="" loading="lazy"/></div>`,
           )
           .join("")
-      : `<div class="muted" style="padding:8px 0">Connect Instagram to load your posts. You can still edit the copy and preview below.</div>`;
+      : `<div class="muted" style="padding:8px 0;grid-column:1/-1">Connect Instagram to load your posts. You can still edit the copy and preview below.</div>`;
   const seeMoreBtn = hasMore
     ? `<button class="btn ghost sm" id="mediaSeeMore" style="margin-top:10px">${
         store.mediaShowAll ? "Show less" : `See more (${store.media.length - MEDIA_ROW_SIZE})`
       }</button>`
     : "";
+  const radio = (group, value, selected, title, sub) =>
+    `<div class="radio-row ${selected ? "selected" : ""}" role="radio" tabindex="0" aria-checked="${selected}" data-group="${group}" data-value="${value}">
+      <span class="radio-dot"></span><div><div class="rr-title">${title}</div>${sub ? `<div class="rr-sub">${sub}</div>` : ""}</div></div>`;
+  const toggle = (id, on, title, sub) =>
+    `<div class="toggle-row"><div><div class="tr-title">${title}</div><div class="tr-sub">${sub}</div></div>
+      <label class="switch"><input type="checkbox" id="${id}" ${on ? "checked" : ""}/><span class="slider"></span></label></div>`;
+  const rewardBtn = (target) => `<button type="button" class="insert-var" data-target="${target}">+ insert link {reward}</button>`;
+  const suggested = i18n.language() === "pt" ? ["Quero", "Link", "Eu quero", "Preço", "Info"] : ["Link", "Price", "Shop", "Info"];
+  const suggestions = suggested.filter(
+    (k) => !d.keywords.some((x) => x.toLowerCase() === k.toLowerCase()),
+  );
+  const tracking = (store.status || {}).link_tracking;
 
   box.innerHTML = `
-    <div class="card">
+    <div class="card" id="sec-media">
       <h3><span class="section-num">1</span>When someone comments on</h3>
       <div class="hint">Pick the post or reel this automation watches.</div>
-      <div class="radio-row selected"><span class="radio-dot"></span><div><div class="rr-title">A specific post or reel</div><div class="rr-sub">Only comments on the selected media trigger the funnel.</div></div></div>
-      <div class="radio-row disabled"><span class="radio-dot"></span><div><div class="rr-title">Any post or reel</div><div class="rr-sub">Soon</div></div></div>
-      <div class="media-grid" id="mediagrid">${mediaGrid}</div>
-      ${seeMoreBtn}
+      ${radio("media", "one", !anyPost, "A specific post or reel", "Only comments on the selected media trigger the funnel.")}
+      ${radio("media", "any", anyPost, "Any post or reel", "Every post on the account, including the next ones you publish.")}
+      <div id="media_one" style="${anyPost ? "display:none" : ""}">
+        <div class="media-grid" id="mediagrid">${mediaGrid}</div>
+        ${seeMoreBtn}
+      </div>
+      <div class="note" id="media_any" style="${anyPost ? "" : "display:none"}">A post with its own automation keeps using that one; this covers all the others. Without webhooks, your 5 most recent posts are checked.</div>
     </div>
 
-    <div class="card">
+    <div class="card" id="sec-words">
       <h3><span class="section-num">2</span>And this comment has</h3>
       <div class="hint">Whole-word match, case-insensitive — “ai” fires on “I like this ai”, not “fair”.</div>
-      <div class="radio-row selected"><span class="radio-dot"></span><div><div class="rr-title">A specific word or words</div></div></div>
-      <label class="field"><span class="label">Keywords (comma separated)</span>
-        <input type="text" id="keywords" value="${esc(d.keywords.join(", "))}" placeholder="Link, Guide"/></label>
-      <div class="chips" id="kwchips">${["Price", "Link", "Shop"].map((k) => `<span class="chip" data-kw="${k}">${k}</span>`).join("")}</div>
-      <label class="field" style="margin-top:14px"><span class="label">Exclude words (optional)</span>
-        <input type="text" id="exclude" value="${esc((d.exclude || []).join(", "))}" placeholder="scam, fake"/></label>
-      <div class="radio-row disabled"><span class="radio-dot"></span><div><div class="rr-title">Any word</div><div class="rr-sub">Soon</div></div></div>
+      ${radio("words", "some", !d.match_any, "A specific word or words", "")}
+      ${radio("words", "any", d.match_any, "Any word", "Every comment starts the funnel (except the excluded words below).")}
+      <div id="kw_wrap" style="${d.match_any ? "display:none" : ""}">
+        <label class="field"><span class="label">Keywords</span><div id="kw_box"></div>
+          <span class="hint">Press Enter after each word.</span></label>
+        <div class="chips" id="kwchips">${suggestions.map((k) => `<span class="chip" data-kw="${k}">+ ${k}</span>`).join("")}</div>
+      </div>
+      <label class="field" style="margin-top:14px"><span class="label">Exclude words (optional)</span><div id="ex_box"></div></label>
 
       <div style="margin-top:8px">
-        <div class="toggle-row"><div><div class="tr-title">Reply to their comment</div><div class="tr-sub">Post a public reply under the comment (rotates to look human).</div></div>
-          <label class="switch"><input type="checkbox" id="pr_enabled" ${d.public_reply.enabled ? "checked" : ""}/><span class="slider"></span></label></div>
+        ${toggle("pr_enabled", d.public_reply.enabled, "Reply to their comment", "Post a public reply under the comment (rotates to look human).")}
         <div id="pr_texts_wrap" style="${d.public_reply.enabled ? "" : "display:none"}">
           <label class="field"><span class="label">Public replies (one per line, rotated)</span>
             <textarea id="pr_texts">${esc((d.public_reply.texts || []).join("\n"))}</textarea></label>
@@ -710,48 +1086,117 @@ function renderSections() {
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="sec-dm">
       <h3><span class="section-num">3</span>They will get</h3>
-      <div class="toggle-row"><div><div class="tr-title">An opening DM</div><div class="tr-sub">Sent as a private reply with a button so it survives the Requests folder. Required to start the funnel.</div></div>
-        <label class="switch"><input type="checkbox" id="opening_enabled" ${d.opening_enabled ? "checked" : ""}/><span class="slider"></span></label></div>
+      ${toggle("opening_enabled", d.opening_enabled, "An opening DM", "Sent as a private reply with a button so it survives the Requests folder. Required to start the funnel.")}
       <div id="opening_wrap" style="${d.opening_enabled ? "" : "display:none"}">
-        <label class="field"><span class="label">Opening message</span><textarea id="c_opening">${esc(d.copy.opening)}</textarea></label>
-        <label class="field"><span class="label">Button label</span><input type="text" id="c_opening_button" maxlength="20" value="${esc(d.copy.opening_button)}"/><span class="hint">Instagram allows 20 characters on a button.</span></label>
+        <label class="field"><span class="label">Opening message</span><textarea id="c_opening" data-max="1000">${esc(d.copy.opening)}</textarea></label>
+        <label class="field"><span class="label">Button label</span><input type="text" id="c_opening_button" maxlength="20" data-max="20" value="${esc(d.copy.opening_button)}"/></label>
       </div>
-      <div class="toggle-row"><div><div class="tr-title">Ask them to follow you first</div><div class="tr-sub">Self-attestation — the tap advances (the API can’t verify a specific follow).</div></div>
-        <label class="switch"><input type="checkbox" id="check_follow" ${d.check_follow ? "checked" : ""}/><span class="slider"></span></label></div>
+      ${toggle("check_follow", d.check_follow, "Ask them to follow you first", "Self-attestation — the tap advances (the API can’t verify a specific follow).")}
       <div id="follow_wrap" style="${d.check_follow ? "" : "display:none"}">
-        <label class="field"><span class="label">Follow message</span><textarea id="c_follow_gate">${esc(d.copy.follow_gate)}</textarea></label>
-        <label class="field"><span class="label">Follow button label</span><input type="text" id="c_follow_button" maxlength="20" value="${esc(d.copy.follow_button)}"/><span class="hint">Instagram allows 20 characters on a button.</span></label>
+        <label class="field"><span class="label">Follow message</span><textarea id="c_follow_gate" data-max="1000">${esc(d.copy.follow_gate)}</textarea></label>
+        <label class="field"><span class="label">Follow button label</span><input type="text" id="c_follow_button" maxlength="20" data-max="20" value="${esc(d.copy.follow_button)}"/></label>
+        <label class="field"><span class="label">Texto do botão visitar perfil</span><input type="text" id="c_follow_profile_button" maxlength="20" data-max="20" value="${esc(d.copy.follow_profile_button || "Visitar perfil")}"/></label>
+        <label class="field"><span class="label">Profile link</span><input type="text" id="c_follow_profile_url" maxlength="500" data-max="500" value="${esc(d.copy.follow_profile_url || "")}"/></label>
       </div>
-      <div class="toggle-row"><div><div class="tr-title">Ask for their email</div><div class="tr-sub">Uses Instagram’s email chip, with a typed-reply fallback.</div></div>
-        <label class="switch"><input type="checkbox" id="ask_email" ${d.ask_email ? "checked" : ""}/><span class="slider"></span></label></div>
+      ${toggle("ask_email", d.ask_email, "Ask for their email", "Uses Instagram’s email chip, with a typed-reply fallback.")}
       <div id="email_wrap" style="${d.ask_email ? "" : "display:none"}">
-        <label class="field"><span class="label">Email ask message</span><textarea id="c_email_ask">${esc(d.copy.email_ask)}</textarea></label>
+        <label class="field"><span class="label">Email ask message</span><textarea id="c_email_ask" data-max="1000">${esc(d.copy.email_ask)}</textarea></label>
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="sec-reward">
       <h3><span class="section-num">4</span>And then, they will get</h3>
       <div class="hint">The reward, delivered by DM. Use <code>{reward}</code> to place your link.</div>
-      <label class="field"><span class="label">Delivery message</span><textarea id="c_delivery">${esc(d.copy.delivery)}</textarea></label>
-      <label class="field"><span class="label">Link or reward</span><input type="url" id="reward_value" value="${esc(d.reward.value)}" placeholder="https://example.com/guide"/></label>
-      <div class="toggle-row"><div><div class="tr-title">Follow-up DM if they don’t click</div><div class="tr-sub">Soon</div></div>
-        <label class="switch"><input type="checkbox" disabled/><span class="slider"></span></label></div>
+      <label class="field"><span class="label">Button name</span><input type="text" id="c_delivery_button" maxlength="30" data-max="30" value="${esc(d.copy.delivery_button || "Get material")}"/></label>
+      <label class="field"><span class="label">Material delivery link</span><input type="url" id="c_delivery_url" maxlength="500" data-max="500" value="${esc(d.copy.delivery_url || "")}"/></label>
+      ${toggle("fu_enabled", d.followup.enabled, "Follow-up DM if they don’t click", "Goes only to people who tapped the button but never opened the link — Instagram allows it within 24 hours.")}
+      <div id="fu_wrap" style="${d.followup.enabled ? "" : "display:none"}">
+        ${tracking === false ? `<div class="banner">Follow-ups start working once chatmany is online with a public https address — that is how it knows who opened the link.</div>` : ""}
+        <label class="field"><span class="label">Send it after</span>
+          <select id="fu_delay">${FOLLOWUP_DELAYS.map((m) => `<option value="${m}" ${m === d.followup.delay_minutes ? "selected" : ""}>${delayLabel(m)}</option>`).join("")}</select></label>
+        <label class="field"><span class="label">Reminder message</span><textarea id="c_followup_message" data-max="1000">${esc(d.copy.followup_message || "")}</textarea></label>
+        <label class="field"><span class="label">Reminder button name</span><input type="text" id="c_followup_button" maxlength="30" data-max="30" value="${esc(d.copy.followup_button || "")}"/></label>
+      </div>
+    </div>
+
+    <div class="card" id="sec-features">
+      <h3><span class="section-num">5</span>Automation features</h3>
+      <div class="hint">Turn each function on or off independently. All are enabled by default.</div>
+      <div class="features-grid" id="features-grid">
+        ${renderFeatureCards(d)}
+      </div>
     </div>`;
 
   wireSections();
   bindLive(box);
 }
 
+/**
+ * Which phone screen and which bubble a builder field shows up in, so the preview follows what is
+ * being edited: focusing a field switches the phone to its screen and highlights its bubble.
+ */
+const FIELD_PREVIEW = {
+  kw_input: ["comments", "comment"],
+  ex_input: ["comments", "comment"],
+  pr_texts: ["comments", "reply"],
+  c_opening: ["dm", "opening"],
+  c_opening_button: ["dm", "opening_button"],
+  c_follow_gate: ["dm", "follow_gate"],
+  c_follow_button: ["dm", "follow_button"],
+  c_follow_profile_button: ["dm", "follow_gate"],
+  c_email_ask: ["dm", "email_ask"],
+  c_delivery: ["dm", "delivery"],
+  c_delivery_button: ["dm", "delivery"],
+  c_delivery_url: ["dm", "delivery"],
+  c_followup_message: ["dm", "followup"],
+  c_followup_button: ["dm", "followup"],
+  reward_value: ["dm", "delivery"],
+  fu_delay: ["dm", "followup"],
+  fu_text: ["dm", "followup"],
+};
+
 function wireSections() {
   const d = store.draft;
+  const ui = window.chatmanyUi;
+
+  // radio groups (clickable and keyboard-accessible)
+  const choose = (group, value) => {
+    if (group === "media") {
+      if (value === "any") {
+        if (d.media_id !== ANY_MEDIA) store.lastMediaId = d.media_id;
+        d.media_id = ANY_MEDIA;
+        d.media_thumb = "";
+      } else if (d.media_id === ANY_MEDIA) {
+        d.media_id = store.lastMediaId || "";
+        d.media_thumb = (store.media.find((m) => m.id === d.media_id) || {}).thumbnail_url || "";
+      }
+      store.previewTab = "post";
+    } else {
+      d.match_any = value === "any";
+      store.previewTab = "comments";
+    }
+    renderSections();
+    renderPreview();
+  };
+  $("#sections").querySelectorAll(".radio-row[data-group]").forEach((r) => {
+    r.onclick = () => choose(r.dataset.group, r.dataset.value);
+    r.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        choose(r.dataset.group, r.dataset.value);
+      }
+    };
+  });
+
   // media
   $("#mediagrid")?.querySelectorAll(".media-thumb").forEach((t) => {
     t.onclick = () => {
       d.media_id = t.dataset.mid;
       d.media_thumb = t.dataset.thumb;
       $("#mediagrid").querySelectorAll(".media-thumb").forEach((x) => x.classList.toggle("selected", x === t));
+      store.previewTab = "post";
       renderPreview();
     };
   });
@@ -762,57 +1207,162 @@ function wireSections() {
       renderSections();
     };
   }
-  // keyword chips
-  $("#kwchips")?.querySelectorAll(".chip").forEach((c) => {
-    c.onclick = () => {
-      const input = $("#keywords");
-      const set = new Set(input.value.split(",").map((x) => x.trim()).filter(Boolean));
-      set.add(c.dataset.kw);
-      input.value = [...set].join(", ");
-      d.keywords = [...set];
-      renderPreview();
-    };
+
+  // keyword and exclude chips
+  const kw = ui.chipInput($("#kw_box"), {
+    values: d.keywords,
+    placeholder: "Link, Guide",
+    inputId: "kw_input",
+    onChange: (list) => {
+      d.keywords = list;
+      $("#kwchips")?.querySelectorAll(".chip").forEach((c) => {
+        c.style.display = list.some((x) => x.toLowerCase() === c.dataset.kw.toLowerCase()) ? "none" : "";
+      });
+      previewFor("kw_input");
+      refreshDirtyUI();
+    },
   });
+  $("#kwchips")?.querySelectorAll(".chip").forEach((c) => (c.onclick = () => kw.add(c.dataset.kw)));
+  ui.chipInput($("#ex_box"), {
+    values: d.exclude || [],
+    placeholder: "scam, fake",
+    inputId: "ex_input",
+    onChange: (list) => {
+      d.exclude = list;
+      refreshDirtyUI();
+    },
+  });
+
   const bindText = (id, fn) => {
     const node = $("#" + id);
     if (node) node.oninput = (e) => fn(e.target.value);
   };
-  bindText("keywords", (v) => (d.keywords = v.split(",").map((x) => x.trim()).filter(Boolean)));
-  bindText("exclude", (v) => (d.exclude = v.split(",").map((x) => x.trim()).filter(Boolean)));
   bindText("pr_texts", (v) => (d.public_reply.texts = v.split("\n").map((x) => x.trim()).filter(Boolean)));
   bindText("c_opening", (v) => (d.copy.opening = v));
   bindText("c_opening_button", (v) => (d.copy.opening_button = v));
   bindText("c_follow_gate", (v) => (d.copy.follow_gate = v));
   bindText("c_follow_button", (v) => (d.copy.follow_button = v));
+  bindText("c_follow_profile_button", (v) => (d.copy.follow_profile_button = v || undefined));
+  bindText("c_follow_profile_url", (v) => (d.copy.follow_profile_url = v || undefined));
   bindText("c_email_ask", (v) => (d.copy.email_ask = v));
   bindText("c_delivery", (v) => (d.copy.delivery = v));
-  bindText("reward_value", (v) => (d.reward.value = v));
+  bindText("c_delivery_button", (v) => (d.copy.delivery_button = v || undefined));
+  bindText("c_delivery_url", (v) => (d.copy.delivery_url = v || undefined));
+  bindText("c_followup_message", (v) => (d.copy.followup_message = v || undefined));
+  bindText("c_followup_button", (v) => (d.copy.followup_button = v || undefined));
+  bindText("reward_value", (v) => (d.reward.value = v.trim()));
+  bindText("fu_text", (v) => (d.followup.text = v));
+  const delay = $("#fu_delay");
+  if (delay) delay.onchange = (e) => (d.followup.delay_minutes = Number(e.target.value));
 
+  // Switching a step on or off shows it on the phone right away (its screen, its message).
   const bindToggle = (id, fn, wrapId) => {
     const node = $("#" + id);
     if (!node) return;
     node.onchange = (e) => {
       fn(e.target.checked);
       if (wrapId) $("#" + wrapId).style.display = e.target.checked ? "" : "none";
-      renderPreview();
+      previewFor(id);
     };
   };
   bindToggle("pr_enabled", (v) => (d.public_reply.enabled = v), "pr_texts_wrap");
   bindToggle("opening_enabled", (v) => (d.opening_enabled = v), "opening_wrap");
   bindToggle("check_follow", (v) => (d.check_follow = v), "follow_wrap");
   bindToggle("ask_email", (v) => (d.ask_email = v), "email_wrap");
+  bindToggle("fu_enabled", (v) => (d.followup.enabled = v), "fu_wrap");
+
+  // Feature toggles (12 independent functions)
+  $("#features-grid")?.querySelectorAll(".feature-toggle").forEach((toggle) => {
+    toggle.onchange = (e) => {
+      if (!d.features) d.features = {};
+      d.features[e.target.dataset.feature] = e.target.checked;
+      refreshDirtyUI();
+      previewFor("sec-features");
+    };
+  });
+
+  // "+ insert link {reward}"
+  $("#sections").querySelectorAll(".insert-var").forEach((b) => {
+    b.onclick = () => ui.insertAtCursor($("#" + b.dataset.target), "{reward}");
+  });
+
+  ui.counters($("#sections"));
+
+  // The phone follows the field being edited. Browsers have no `onfocusin` property, so this is a
+  // listener — attached once, since the sections container survives every re-render.
+  const sections = $("#sections");
+  if (!sections.dataset.followsFocus) {
+    sections.dataset.followsFocus = "1";
+    sections.addEventListener("focusin", (e) => previewFor(e.target.id));
+    // Clicking anywhere in a step (not just a field) shows that step's screen.
+    sections.addEventListener("pointerdown", (e) => {
+      if (e.target.closest("input, textarea, select, label.switch, .radio-row, .media-thumb, .chip, .insert-var")) return;
+      const card = e.target.closest(".card[id]");
+      if (card && SECTION_PREVIEW[card.id]) previewFor(card.id);
+    });
+  }
 }
 
-/* ---------------- live phone preview ---------------- */
-const iosStatusBar = () => `
-  <div class="ios-status">
-    <span class="time">9:41</span>
-    <span class="icons">
-      <span class="bars"><span></span><span></span><span></span><span></span></span>
-      <svg width="15" height="11" viewBox="0 0 15 11" fill="#fff"><path d="M7.5 0C4.9 0 2.5 1 .6 2.7a.6.6 0 0 0 0 .9l1 1a.6.6 0 0 0 .8 0A8 8 0 0 1 7.5 2.6a8 8 0 0 1 5.1 1.9.6.6 0 0 0 .8 0l1-1a.6.6 0 0 0 0-.9A10.5 10.5 0 0 0 7.5 0Zm0 4a6 6 0 0 0-4 1.5.6.6 0 0 0 0 .9l1 1a.6.6 0 0 0 .8 0 3.4 3.4 0 0 1 4.4 0 .6.6 0 0 0 .8 0l1-1a.6.6 0 0 0 0-.9A6 6 0 0 0 7.5 4Zm0 4a2.2 2.2 0 0 0-1.5.6.6.6 0 0 0 0 .9l1 1a.6.6 0 0 0 .8 0l1-1a.6.6 0 0 0 0-.9A2.2 2.2 0 0 0 7.5 8Z"/></svg>
-      <span class="battery"></span>
-    </span>
-  </div>`;
+/** Default phone screen for each builder step, when the click is not on a specific field. */
+const SECTION_PREVIEW = {
+  "sec-media": ["post", null],
+  "sec-words": ["comments", "comment"],
+  "sec-dm": ["dm", "opening"],
+  "sec-reward": ["dm", "delivery"],
+  "sec-features": ["dm", "delivery"],
+};
+/** Toggles show the message they switch on or off. */
+const TOGGLE_PREVIEW = {
+  pr_enabled: ["comments", "reply"],
+  opening_enabled: ["dm", "opening"],
+  check_follow: ["dm", "follow_gate"],
+  ask_email: ["dm", "email_ask"],
+  fu_enabled: ["dm", "followup"],
+};
+
+/** Show the phone screen (and highlight the message) that a field, toggle or step belongs to. */
+function previewFor(id) {
+  const link = FIELD_PREVIEW[id] || TOGGLE_PREVIEW[id] || SECTION_PREVIEW[id];
+  if (link) {
+    store.previewTab = link[0];
+    store.previewFocus = link[1];
+  }
+  renderPreview();
+}
+
+/* ---------------- live phone preview ----------------
+   An iPhone running Instagram in dark mode, as the connected account (@username, photo, real post,
+   caption and counts), showing the post, the comment thread or the DM funnel — and following the
+   builder step by step (see FIELD_PREVIEW / previewFor). Instagram's own labels go through i18n.t();
+   the messages followers will receive are shown exactly as written (the .iphone subtree is skipped
+   by the automatic translation). */
+const PHONE_ICON = {
+  back: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>`,
+  dots: `<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>`,
+  home: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3 3 10v10a1 1 0 0 0 1 1h5v-6h6v6h5a1 1 0 0 0 1-1V10z"/></svg>`,
+  search: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>`,
+  plus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="5"/><path d="M12 8v8M8 12h8"/></svg>`,
+  reels: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="5"/><path d="M3 8h18M8 3l3 5M13 3l3 5M10 12v5l4-2.5z"/></svg>`,
+  heart: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 21s-7-4.35-9.5-8.5C.5 9 2 5.5 5.5 5.5c2 0 3.2 1.2 3.5 2 .3-.8 1.5-2 3.5-2 3.5 0 5 3.5 3 7C19 16.65 12 21 12 21z"/></svg>`,
+  comment: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.5 8.5 8.5 0 0 1-3.8-.9L3 21l1.9-5.7A8.5 8.5 0 1 1 21 11.5z"/></svg>`,
+  send: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>`,
+  bookmark: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M19 21 12 16l-7 5V4a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1z"/></svg>`,
+  camera: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 7h3l2-3h6l2 3h3a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="4"/></svg>`,
+  image: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg>`,
+  sticker: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M14 3H6a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3h8l7-7V6a3 3 0 0 0-3-3z"/><path d="M14 21v-4a3 3 0 0 1 3-3h4"/></svg>`,
+  call: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a1 1 0 0 1-1 1A16 16 0 0 1 4 5a1 1 0 0 1 1-1z"/></svg>`,
+  video: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 10 6-3v10l-6-3z"/></svg>`,
+  wifi: `<svg viewBox="0 0 15 11" fill="currentColor"><path d="M7.5 0C4.9 0 2.5 1 .6 2.7a.6.6 0 0 0 0 .9l1 1a.6.6 0 0 0 .8 0A8 8 0 0 1 7.5 2.6a8 8 0 0 1 5.1 1.9.6.6 0 0 0 .8 0l1-1a.6.6 0 0 0 0-.9A10.5 10.5 0 0 0 7.5 0Zm0 4a6 6 0 0 0-4 1.5.6.6 0 0 0 0 .9l1 1a.6.6 0 0 0 .8 0 3.4 3.4 0 0 1 4.4 0 .6.6 0 0 0 .8 0l1-1a.6.6 0 0 0 0-.9A6 6 0 0 0 7.5 4Zm0 4a2.2 2.2 0 0 0-1.5.6.6.6 0 0 0 0 .9l1 1a.6.6 0 0 0 .8 0l1-1a.6.6 0 0 0 0-.9A2.2 2.2 0 0 0 7.5 8Z"/></svg>`,
+  signal: `<svg viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="1"/><rect x="4.5" y="5" width="3" height="6" rx="1"/><rect x="9" y="2.5" width="3" height="8.5" rx="1"/><rect x="13.5" y="0" width="3" height="11" rx="1"/></svg>`,
+};
+
+/** The connected account's avatar: the photo when there is one, its initial otherwise. */
+function phoneAvatar(cls) {
+  const s = store.status || {};
+  const initial = esc(((s.username || "?")[0] || "?").toUpperCase());
+  const photo = s.profile_picture_url ? `<img src="${esc(s.profile_picture_url)}" alt="" onerror="this.remove()"/>` : "";
+  return `<span class="ig-av ${cls}"><span>${initial}</span>${photo}</span>`;
+}
 
 function renderPreview() {
   refreshDirtyUI();
@@ -820,84 +1370,134 @@ function renderPreview() {
   const s = store.status || {};
   const col = $("#previewcol");
   if (!col) return;
-  const avatar = s.profile_picture_url || "";
+  const t = i18n.t;
   const uname = s.username || "yourbrand";
   const media = store.media.find((m) => m.id === d.media_id) || store.media[0] || {};
   const thumb = d.media_thumb || media.thumbnail_url || media.media_url || "";
   const kw = d.keywords[0] || "Link";
-  const reward = d.reward.value || "your link";
+  // Placeholders for what isn't chosen yet (no link, no post) are preview-only, so they follow
+  // the UI language; everything the owner wrote is shown as is.
+  const reward = d.reward.value || t("your link");
   const deliveryText = (d.copy.delivery || "").replace(/\{reward\}/g, reward);
-  const caption = media.caption || `New drop is live 🔥 comment "${kw}" and I'll send it.`;
+  const caption = media.caption || t(`New drop is live 🔥 comment "${kw}" and I'll send it.`);
   const captionLong = caption.length > 70;
   const captionShown = store.captionExpanded || !captionLong ? caption : caption.slice(0, 70) + "…";
+  const posted = media.timestamp
+    ? new Date(media.timestamp).toLocaleDateString(i18n.language() === "pt" ? "pt-BR" : "en-US", { day: "numeric", month: "short", year: "numeric" })
+    : "";
+  const comments = (media.comments_count ?? 0) + (d.public_reply.enabled ? 1 : 0);
+  const reply = d.public_reply.enabled && (d.public_reply.texts[0] || "");
 
-  const tabBtn = (id, label) => `<button class="${store.previewTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`;
+  const postHeader = `
+    <div class="ig-appbar">${PHONE_ICON.back}
+      <div class="title stacked"><span class="over">${esc(uname.toUpperCase())}</span><span>${t("Publication")}</span></div>
+      <span class="ig-icon-spacer"></span></div>`;
+  const postBody = `
+    <div class="ig-posthead">${phoneAvatar("sm")}<span class="u">${esc(uname)}</span>${PHONE_ICON.dots}</div>
+    ${thumb ? `<img class="ig-media" src="${esc(thumb)}" alt=""/>` : `<div class="ig-media empty">${PHONE_ICON.camera}</div>`}`;
 
-  let body = "";
+  let screen = "";
   if (store.previewTab === "post") {
-    body = `<div class="ig">
-      <div class="ig-top"><img src="${esc(avatar)}" onerror="this.style.visibility='hidden'"/><span class="u">${esc(uname)}</span></div>
-      ${thumb ? `<img class="ig-media" src="${esc(thumb)}"/>` : `<div class="ig-media"></div>`}
-      <div class="ig-actions"><span class="heart">${ICON.heartO}</span><span>${ICON.cmt}</span><span>${ICON.send}</span></div>
-      <div class="ig-stats">${(media.like_count ?? 128).toLocaleString()} likes · ${(media.comments_count ?? 0) + (d.public_reply.enabled ? 1 : 0)} comments</div>
-      <div class="ig-caption"><span class="u">${esc(uname)}</span>${esc(captionShown)}${
-        captionLong ? `<span class="ig-caption-toggle" id="captoggle"> ${store.captionExpanded ? "less" : "more"}</span>` : ""
-      }</div>
-    </div>`;
-  } else if (store.previewTab === "comments") {
-    body = `<div class="ig">
-      ${thumb ? `<img class="ig-media" style="aspect-ratio:16/9;opacity:.5" src="${esc(thumb)}"/>` : ""}
-      <div class="sheet">
-        <div class="sheet-handle"></div>
-        <div class="sheet-head"><span>Comments</span>${ICON.send}</div>
-        <div class="sheet-body">
-          <div class="cmt"><div class="av">@</div><div class="body"><span class="u">follower</span>${esc(kw)}!<div class="meta">2m · Reply</div></div>${""
-          }</div>
-          ${
-            d.public_reply.enabled && (d.public_reply.texts[0] || "")
-              ? `<div class="cmt reply"><div class="av">${esc((uname[0] || "y")).toUpperCase()}</div><div class="body"><span class="u">${esc(uname)}</span>${esc(d.public_reply.texts[0])}<div class="meta">now · Reply</div></div></div>`
-              : ""
-          }
-        </div>
-        <div class="sheet-emojis"><span>❤️</span><span>🙌</span><span>🔥</span><span>👏</span><span>😢</span><span>😍</span><span>😮</span><span>😂</span></div>
-        <div class="sheet-input-row"><img class="av" src="${esc(avatar)}" onerror="this.style.visibility='hidden'"/><span class="fake-input">Add a comment for ${esc(uname)}...</span></div>
+    screen = `
+      ${postHeader}
+      <div class="ig-content" data-k="post">
+        ${postBody}
+        <div class="ig-actions">
+          <span class="act">${PHONE_ICON.heart}<b>${(media.like_count ?? 0).toLocaleString()}</b></span>
+          <span class="act">${PHONE_ICON.comment}<b>${comments}</b></span>
+          <span class="act">${PHONE_ICON.send}</span><span class="grow"></span>${PHONE_ICON.bookmark}</div>
+        <div class="ig-caption"><span class="u">${esc(uname)}</span>${esc(captionShown)}${
+          captionLong ? `<span class="ig-caption-toggle" id="captoggle"> ${t(store.captionExpanded ? "less" : "more")}</span>` : ""
+        }</div>
+        <div class="ig-muted">${t("View all comments")}</div>
+        ${posted ? `<div class="ig-date">${esc(posted)}</div>` : ""}
       </div>
-    </div>`;
+      <div class="ig-bottomnav">${PHONE_ICON.home}${PHONE_ICON.search}${PHONE_ICON.plus}${PHONE_ICON.reels}${phoneAvatar("xs")}</div>`;
+  } else if (store.previewTab === "comments") {
+    const commentRow = (who, avatar, text, key) => `
+      <div class="cmt" data-k="${key}">${avatar}
+        <div class="body"><div><span class="u">${who}</span><span class="when">${t("Now")}</span></div>
+          <div class="text">${text}</div><div class="meta">${t("Reply")}</div></div>
+        <span class="like">${PHONE_ICON.heart}</span></div>`;
+    screen = `
+      ${postHeader}
+      <div class="ig-behind">${postBody}</div>
+      <div class="ig-sheet">
+        <div class="sheet-handle"></div>
+        <div class="sheet-head"><span>${t("Comments")}</span>${PHONE_ICON.send}</div>
+        <div class="ig-content">
+          ${commentRow(t("User"), `<span class="ig-av sm guest"></span>`, esc(d.match_any ? t("Love this! 😍") : kw), "comment")}
+          ${reply ? `<div class="cmt-reply">${commentRow(esc(uname), phoneAvatar("sm"), esc(reply), "reply")}</div>` : ""}
+        </div>
+        <div class="ig-emojis"><span>❤️</span><span>🙌</span><span>🔥</span><span>👏</span><span>😢</span><span>😍</span><span>😮</span><span>😂</span></div>
+        <div class="ig-inputrow">${phoneAvatar("sm")}<span class="fake-input">${esc(t(`Add a comment for ${uname}...`))}</span></div>
+      </div>`;
   } else {
-    // DM funnel — a two-sided conversation: business messages on the left, the follower's taps
-    // echoed back on the right at every step, so the preview reads as "this is what they'd see."
+    // DM funnel as the follower sees it: our messages on the left in cards (a button belongs to the
+    // message it came with), their taps echoed on the right, our avatar under each run of ours.
+    const ours = (inner, key) => `<div class="dm-row" data-k="${key}"><div class="dm-card">${inner}</div></div>`;
+    const button = (label, key) => `<div class="dm-card-btn" data-k="${key}">${esc(label)}</div>`;
+    const theirs = (text) => `<div class="bubble out">${esc(text)}</div>`;
     const blocks = [];
     if (d.opening_enabled) {
-      blocks.push(`<div class="bubble in">${esc(d.copy.opening)}</div>`);
-      blocks.push(`<div class="dm-btn">${esc(d.copy.opening_button || "Continue")}</div>`);
-      blocks.push(`<div class="bubble out">${esc(d.copy.opening_button || "Continue")}</div>`);
-      blocks.push(`<div class="dm-note">tap moves the chat out of Requests →</div>`);
+      const label = d.copy.opening_button || "Continue";
+      blocks.push(ours(`<div class="dm-text">${esc(d.copy.opening)}</div>${button(label, "opening_button")}`, "opening"));
+      blocks.push(theirs(label));
+      blocks.push(`<div class="dm-note">${t("tap moves the chat out of Requests →")}</div>`);
     } else {
-      blocks.push(`<div class="dm-note">Opening DM is off — the funnel won’t start.</div>`);
+      blocks.push(`<div class="dm-note">${t("Opening DM is off — the funnel won’t start.")}</div>`);
     }
     if (d.check_follow) {
-      // Rendered as a button, not a quick-reply chip, to match what the engine actually sends.
-      blocks.push(`<div class="bubble in">${esc(d.copy.follow_gate)}</div>`);
-      blocks.push(`<div class="dm-btn">${esc(d.copy.follow_button || "✅ I followed")}</div>`);
-      blocks.push(`<div class="bubble out">${esc(d.copy.follow_button || "✅ I followed")}</div>`);
+      const followLabel = d.copy.follow_button || "✅ I followed";
+      const profileLabel = d.copy.follow_profile_button || "👤 Visitar perfil";
+      blocks.push(ours(`<div class="dm-text">${esc(d.copy.follow_gate)}</div>${button(followLabel, "follow_button")}<div style="margin-top:8px">${button(profileLabel, "follow_profile")}</div>`, "follow_gate"));
+      blocks.push(theirs(followLabel));
     }
     if (d.ask_email) {
-      blocks.push(`<div class="bubble in">${esc(d.copy.email_ask)}</div>`);
-      blocks.push(`<div class="qr"><span class="pill">your@email.com</span></div>`);
-      blocks.push(`<div class="bubble out">your@email.com</div>`);
+      blocks.push(ours(`<div class="dm-text">${esc(d.copy.email_ask)}</div>`, "email_ask"));
+      blocks.push(`<div class="qr"><span class="pill">${esc(t("your@email.com"))}</span></div>`);
+      blocks.push(theirs(t("your@email.com")));
     }
-    blocks.push(`<div class="bubble in">${esc(deliveryText)}</div>`);
-    body = `<div class="ig"><div class="dm">${blocks.join("")}</div></div>`;
+    const deliveryMsg = "Aqui está 🎁 seu material";
+    const deliveryBtnLabel = d.copy.delivery_button || "Get material";
+    blocks.push(ours(`<div class="dm-text">${esc(deliveryMsg)}</div>${button(deliveryBtnLabel, "delivery_button")}`, "delivery"));
+    if (d.followup.enabled) {
+      const followupMsg = d.copy.followup_message || "Still interested? Here's your link again 👇";
+      const followupBtnLabel = d.copy.followup_button || "Get material";
+      blocks.push(`<div class="dm-note">${esc(t(`If they don't open the link, ${delayLabel(d.followup.delay_minutes)} later:`))}</div>`);
+      blocks.push(ours(`<div class="dm-text">${esc(followupMsg)}</div>${button(followupBtnLabel, "followup_button")}`, "followup"));
+    }
+    const dmHeader = `
+      <div class="ig-appbar">${PHONE_ICON.back}<span class="chat-who" title="${t("Visit profile")}" style="cursor:pointer">${phoneAvatar("sm")}<span class="name">${esc(uname)}</span></span><span style="color:#a8a8a8;font-size:11px;margin-left:auto;padding-right:8px;cursor:pointer" title="${t("Visit profile")}">👤</span>${PHONE_ICON.call}${PHONE_ICON.video}</div>`;
+    screen = `
+      ${dmHeader}
+      <div class="ig-content"><div class="dm">${groupWithAvatar(blocks.join(""))}</div></div>
+      <div class="ig-composer"><span class="cam">${PHONE_ICON.camera}</span><span class="ph">${t("Message...")}</span>${PHONE_ICON.image}${PHONE_ICON.sticker}${PHONE_ICON.plus}</div>`;
   }
 
+  const getTime = () => new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: false });
+  const tabBtn = (id, label) => `<button class="${store.previewTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`;
   col.innerHTML = `
-    <div class="phone"><div class="phone-screen">
-      ${iosStatusBar()}
-      <div class="seg">${tabBtn("post", "Post")}${tabBtn("comments", "Comments")}${tabBtn("dm", "DM")}</div>
-      ${body}
-    </div></div>`;
-  col.querySelectorAll(".seg button").forEach((b) => (b.onclick = () => {
+    <div class="iphone"><div class="iphone-screen">
+      <div class="iphone-island"></div>
+      <div class="ig-status"><span id="phone-time">${getTime()}</span><span class="icons">${PHONE_ICON.signal}${PHONE_ICON.wifi}<span class="battery"></span></span></div>
+      ${screen}
+      <div class="iphone-home"></div>
+    </div></div>
+    <div class="preview-tabs">${tabBtn("post", "Post")}${tabBtn("comments", "Comments")}${tabBtn("dm", "DM")}</div>`;
+
+  // Update time every second without re-rendering the whole preview
+  const timeEl = col.querySelector("#phone-time");
+  if (timeEl && !window._phoneTimeInterval) {
+    window._phoneTimeInterval = setInterval(() => {
+      const t = col.querySelector("#phone-time");
+      if (t) t.textContent = getTime();
+    }, 1000);
+  }
+
+  col.querySelectorAll(".preview-tabs button").forEach((b) => (b.onclick = () => {
     store.previewTab = b.dataset.tab;
+    store.previewFocus = null;
     store.captionExpanded = false;
     renderPreview();
   }));
@@ -908,6 +1508,27 @@ function renderPreview() {
       renderPreview();
     };
   }
+  // Highlight what is being edited (see FIELD_PREVIEW) and keep it in view inside the phone.
+  const focused = store.previewFocus && col.querySelector(`.ig-content [data-k="${store.previewFocus}"]`);
+  if (focused) {
+    focused.classList.add("hl");
+    const content = focused.closest(".ig-content");
+    if (content) content.scrollTop = Math.max(0, focused.offsetTop - content.clientHeight / 2);
+  }
+}
+
+/** Put the account's avatar under the last card of each run of our messages, like Instagram. */
+function groupWithAvatar(html) {
+  const box = document.createElement("div");
+  box.innerHTML = html;
+  const rows = [...box.children];
+  rows.forEach((row, i) => {
+    if (!row.classList.contains("dm-row")) return;
+    const next = rows[i + 1];
+    if (!next || !next.classList.contains("dm-row")) row.insertAdjacentHTML("afterbegin", phoneAvatar("xs dm-av"));
+    else row.insertAdjacentHTML("afterbegin", `<span class="ig-av xs dm-av ghost"></span>`);
+  });
+  return box.innerHTML;
 }
 
 /* ---------------- unsaved-changes tracking ----------------
@@ -948,9 +1569,11 @@ function refreshDirtyUI() {
 function confirmDiscard(what = "leave") {
   if (!isDirty()) return true;
   return confirm(
-    `You have unsaved changes to "${store.draft.name || "this automation"}".\n\n` +
-      `They will NOT take effect until you save. If you ${what} now, the changes are lost.\n\n` +
-      `OK to discard them, or Cancel to go back and save.`,
+    i18n.t(
+      `You have unsaved changes to "${store.draft.name || "this automation"}".\n\n` +
+        `They will NOT take effect until you save. If you ${what} now, the changes are lost.\n\n` +
+        `OK to discard them, or Cancel to go back and save.`,
+    ),
   );
 }
 
@@ -973,29 +1596,62 @@ function buildCampaignFromDraft() {
     campaign_id: d.campaign_id || `${slug(d.name)}-${Math.random().toString(36).slice(2, 8)}`,
     name: d.name,
     media_id: d.media_id,
-    keywords: d.keywords,
+    folder: d.folder || undefined,
+    keywords: d.match_any ? [] : d.keywords,
+    match_any: d.match_any,
     exclude: d.exclude,
     public_reply: d.public_reply.enabled ? { enabled: true, texts: d.public_reply.texts } : { enabled: false, texts: d.public_reply.texts },
     check_follow: d.check_follow,
     ask_email: d.ask_email,
     reward: d.reward,
     copy: d.copy,
+    followup: d.followup,
   };
 }
 
-function validateDraft(d) {
-  if (!d.media_id) return "Select a post or reel in section 1.";
-  if (!d.keywords.length) return "Add at least one keyword in section 2.";
-  if (!d.reward.value) return "Add your link or reward in section 4.";
-  if (!d.opening_enabled) return "Turn on the opening DM — it’s required to start the funnel.";
-  return null;
+/**
+ * Everything that keeps the automation from going live, each with the field to jump to. Shown as a
+ * clickable checklist (see showIssues) rather than one toast at a time.
+ */
+function draftIssues(d) {
+  const issues = [];
+  if (!d.media_id) issues.push({ msg: "Select a post or reel in section 1.", target: "sec-media" });
+  if (!d.match_any && !d.keywords.length) issues.push({ msg: "Add at least one keyword in section 2.", target: "kw_input" });
+  if (!d.opening_enabled) issues.push({ msg: "Turn on the opening DM — it’s required to start the funnel.", target: "opening_enabled" });
+  if (!d.reward.value) issues.push({ msg: "Add your link or reward in section 4.", target: "reward_value" });
+  if (d.followup.enabled && !d.followup.text.trim()) issues.push({ msg: "Write the follow-up message in section 4.", target: "fu_text" });
+  return issues;
+}
+
+/** The go-live checklist above the sections; each item scrolls to and focuses its field. */
+function showIssues(issues) {
+  const box = $("#issues");
+  if (!box) return;
+  if (!issues.length) {
+    box.innerHTML = "";
+    return;
+  }
+  box.innerHTML = `<div class="issues"><div class="issues-title">${ICON.send}<span>Before going live:</span></div>${issues
+    .map((it) => `<button type="button" class="issue" data-target="${it.target}">${esc(it.msg)}<span>→</span></button>`)
+    .join("")}</div>`;
+  box.querySelectorAll(".issue").forEach((b) => {
+    b.onclick = () => {
+      const target = document.getElementById(b.dataset.target);
+      if (!target) return;
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      target.classList.add("flash");
+      setTimeout(() => target.classList.remove("flash"), 1400);
+      if (target.matches("input, textarea, select")) target.focus({ preventScroll: true });
+    };
+  });
+  box.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
 async function saveCampaign(activation) {
   const d = store.draft;
-  const err = validateDraft(d);
-  if (err && activation === "activate") return toast(err, true);
-  if (err && !activation) return toast(err, true);
+  const issues = draftIssues(d);
+  showIssues(activation === "deactivate" ? [] : issues);
+  if (issues.length && activation !== "deactivate") return toast(issues[0].msg, true);
   const campaign = buildCampaignFromDraft();
   // persist name inside config via copy? name is stored on the campaign object (config_json).
   campaign.name = d.name;
@@ -1060,6 +1716,8 @@ async function renderDashboard() {
       ${card(c.follows, "Follows")}
       ${card(c.emails, "Emails")}
       ${card(c.delivered, "Delivered")}
+      ${card(c.link_clicks ?? 0, "Link opens")}
+      ${card(c.followups ?? 0, "Follow-ups sent")}
     </div>
     <div class="card">
       <h3>Conversion funnel</h3>
