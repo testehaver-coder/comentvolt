@@ -134,7 +134,6 @@ export function validateCampaign(input: unknown, index = 0): Campaign {
     match_any: matchAny,
     exclude: (c.exclude as string[] | undefined) ?? [],
     public_reply: c.public_reply as Campaign["public_reply"],
-    like_comment: Boolean(c.like_comment),
     check_follow: Boolean(c.check_follow),
     verify_follow_count: Boolean(c.verify_follow_count),
     ask_email: Boolean(c.ask_email),
