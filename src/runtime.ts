@@ -28,8 +28,26 @@ export async function buildRuntime(env: Env): Promise<Runtime | null> {
   const igUserId = auth.ig_user_id ?? "me";
   const client = new InstagramClient(auth.access_token, env.GRAPH_VERSION, igUserId);
   const queue = new SendQueue();
-  const engine = new Engine(env.DB, client, queue);
+  const engine = new Engine(env.DB, client, queue, auth.ig_user_id ?? undefined, publicUrl(env) ?? undefined);
   return { client, queue, engine, auth, igUserId };
+}
+
+/**
+ * This Worker's public https address — PUBLIC_URL, or else the origin of REDIRECT_URI once that
+ * points at the real Worker (the shipped placeholder does not count). Null when unknown: tracked
+ * reward links, and so follow-ups, then stay off.
+ */
+export function publicUrl(env: Env): string | null {
+  for (const candidate of [env.PUBLIC_URL, env.REDIRECT_URI]) {
+    if (!candidate || /REPLACE/i.test(candidate)) continue;
+    try {
+      const url = new URL(candidate);
+      if (url.protocol === "https:") return url.origin;
+    } catch {
+      /* not a URL: try the next one */
+    }
+  }
+  return null;
 }
 
 const MIN_POLL_SECONDS = 30;

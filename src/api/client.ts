@@ -63,6 +63,8 @@ export interface IgMedia {
   permalink?: string;
   like_count?: number;
   comments_count?: number;
+  /** ISO-8601 publish time (shown under the caption in the builder's phone preview). */
+  timestamp?: string;
 }
 
 export interface IgProfile {
@@ -275,7 +277,7 @@ export class InstagramClient {
   /** The connected account's media (for the builder media picker + preview). */
   async getMedia(limit = 25): Promise<IgMedia[]> {
     const res = await this.get<{ data?: IgMedia[] }>(`/me/media`, {
-      fields: "id,caption,media_type,media_url,thumbnail_url,permalink,like_count,comments_count",
+      fields: "id,caption,media_type,media_url,thumbnail_url,permalink,like_count,comments_count,timestamp",
       limit: String(limit),
     });
     return res.data ?? [];

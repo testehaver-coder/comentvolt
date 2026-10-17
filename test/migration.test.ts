@@ -86,26 +86,24 @@ describe("migrating an existing database", () => {
 });
 
 describe("deploying BEFORE migrating — why the order matters", () => {
-  it("the person is DMed and then lost: no funnel row, and the comment retries forever", async () => {
+  // The newest migration (0006, follow-ups) was written so that this order is survivable: its
+  // columns and table are only ever written AFTER the person's state is safely recorded, and both
+  // writes tolerate their absence. Earlier migrations were not like that — deploying the
+  // tap_retries code before 0005 DMed new leads and then lost them — so keep migrating first.
+  // Update this test when a later migration lands.
+  it("new leads still get their reward; only the follow-up waits for the migration", async () => {
     const { db, raw } = makeTestDbWithHandle(PREVIOUS); // new code, old schema
     const client = new FakeClient();
-    await upsertCampaign(db, campaign(), true);
-    const engine = new Engine(db, client as never, fast());
+    await upsertCampaign(db, campaign({ followup: { enabled: true, delay_minutes: 60, text: "x {reward}" } }), true);
+    const engine = new Engine(db, client as never, fast(), undefined, "https://chatmany.example.workers.dev");
 
-    for (let tick = 0; tick < 3; tick++) {
-      // The column the newest migration adds — update this when a later migration adds another.
-      await expect(engine.handleComment(comment())).rejects.toThrow(/tap_retries/);
-    }
-
-    // They received exactly one DM — so from their side the automation looks like it worked...
-    expect(client.calls.privateReply).toHaveLength(1);
-    // ...but nothing recorded them, so tapping the button can never advance anything,
-    // and the comment is never marked processed, so every poll retries it forever.
-    expect(raw.prepare("SELECT COUNT(*) AS n FROM conversations").get()).toMatchObject({ n: 0 });
-    expect(raw.prepare("SELECT COUNT(*) AS n FROM processed_comments").get()).toMatchObject({ n: 0 });
-
+    await engine.handleComment(comment());
     await engine.handleMessage(msg({ payload: "OPENING_TAP" }));
-    expect(client.calls.privateReply).toHaveLength(1); // still nothing; they are stranded
+
+    expect((await getConversation(db, "u1", "c1"))?.state).toBe("DONE");
+    // The plain link: there is nowhere to track it yet.
+    expect(client.calls.text).toEqual([{ igsid: "u1", text: "here https://x.com/g" }]);
+    expect(raw.prepare("SELECT COUNT(*) AS n FROM processed_comments").get()).toMatchObject({ n: 1 });
   });
 
   it("existing conversations are unaffected — the damage is confined to new leads", async () => {

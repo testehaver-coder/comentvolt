@@ -14,7 +14,8 @@ import {
   setCampaignArchived,
   upsertCampaign,
 } from "../db";
-import { buildRuntime } from "../runtime";
+import { buildRuntime, publicUrl } from "../runtime";
+import { isPostizManaged, syncInstagramFromPostiz } from "../auth/postiz";
 import { getPollAgeSeconds, getPollError } from "../poller/messagePoll";
 import { getCommentPollError } from "../poller/commentPoll";
 import type { Env } from "../types";
@@ -46,8 +47,16 @@ export async function handleApi(env: Env, req: Request, url: URL): Promise<Respo
 }
 
 async function statusResponse(env: Env): Promise<Response> {
+  // Postiz-managed: look again soon while disconnected, so an Instagram just connected in Postiz
+  // shows up on the next screen load; otherwise the regular throttle applies.
+  const managedBy = isPostizManaged(env) ? "postiz" : null;
+  if (managedBy) await syncInstagramFromPostiz(env, { maxAgeS: (await getAuth(env.DB)) ? 900 : 15 });
+  // Where the owner connects Instagram when Postiz manages it (its calendar has Add Channel).
+  const postizUrl = managedBy && env.POSTIZ_APP_URL ? env.POSTIZ_APP_URL : null;
+  // Follow-ups need tracked links, which need this Worker's public address.
+  const linkTracking = publicUrl(env) !== null;
   const auth = await getAuth(env.DB);
-  if (!auth) return json({ connected: false });
+  if (!auth) return json({ connected: false, managed_by: managedBy, postiz_url: postizUrl, link_tracking: linkTracking });
   // Poll health belongs HERE, not only on /auth/status: this is the endpoint the dashboard calls.
   // The signal added after the 2026-08-09 stall went onto /auth/status, which nothing in the UI
   // ever requests — so the one thing built to make a frozen poller visible was itself invisible.
@@ -56,6 +65,9 @@ async function statusResponse(env: Env): Promise<Response> {
   const commentPollError = await getCommentPollError(env.DB);
   return json({
     connected: true,
+    managed_by: managedBy,
+    postiz_url: postizUrl,
+    link_tracking: linkTracking,
     username: auth.username,
     account_type: auth.account_type,
     profile_picture_url: auth.profile_picture_url,
@@ -150,6 +162,8 @@ async function dashboard(env: Env, url: URL): Promise<Response> {
       follows: counts.follow_confirmed,
       emails: counts.email_captured,
       delivered: counts.delivered,
+      link_clicks: counts.link_clicked,
+      followups: counts.followup_sent,
     },
     funnel: [
       { label: "Commented", value: comments, pct: 100 },

@@ -12,7 +12,10 @@ import { handleAuthorize, handleCallback, handleDisconnect, handleStatus } from 
 import { handleConfigExport, handleConfigImport } from "./routes/config";
 import { handleWebhookAdmin, handleWebhookEvent, handleWebhookVerify } from "./routes/webhook";
 import { handleApi } from "./routes/api";
-import { isOwner, json } from "./routes/http";
+import { isOwner, json, withFrameAncestors } from "./routes/http";
+import { issueSession, verifyTicket } from "./auth/session";
+import { isPostizManaged, syncInstagramFromPostiz } from "./auth/postiz";
+import { handleTrackedLink } from "./routes/links";
 
 const POLL_CRON = "* * * * *";
 const REFRESH_CRON = "0 3 * * *";
@@ -31,13 +34,21 @@ export default {
     // existing connection with a different account). /auth/authorize is owner-only, below.
     if (pathname === "/auth/callback" && method === "GET") return handleCallback(env, url);
 
+    // Tracked reward link (follow-ups): record the click and redirect. Public, see routes/links.ts.
+    const tracked = pathname.match(/^\/r\/([A-Za-z0-9]{8,64})$/);
+    if (tracked && method === "GET") return handleTrackedLink(env, tracked[1]!);
+
+    // Postiz single sign-on: trade a ticket signed by Postiz for a session token. Public by
+    // design — the signed, short-lived ticket is the credential (see auth/session.ts).
+    if (pathname === "/auth/sso" && method === "POST") return handleSso(env, req);
+
     // Webhook (only meaningful when MODE=webhook; verification is always safe to answer).
     if (pathname === "/webhook" && method === "GET") return handleWebhookVerify(env, url);
     if (pathname === "/webhook" && method === "POST") return handleWebhookEvent(env, req);
 
     // --- owner-only API + admin routes ---
     if (pathname.startsWith("/api/")) {
-      if (!isOwner(req, url, env)) return json({ error: "unauthorized" }, 401);
+      if (!(await isOwner(req, url, env))) return json({ error: "unauthorized" }, 401);
       return handleApi(env, req, url);
     }
     const ownerRoutes = new Set([
@@ -50,7 +61,11 @@ export default {
       "/admin/webhook",
     ]);
     if (ownerRoutes.has(pathname)) {
-      if (!isOwner(req, url, env)) return json({ error: "unauthorized" }, 401);
+      if (!(await isOwner(req, url, env))) return json({ error: "unauthorized" }, 401);
+      // With Postiz managing Instagram, connecting and disconnecting happen there, not here.
+      if (isPostizManaged(env) && (pathname === "/auth/authorize" || pathname === "/auth/disconnect")) {
+        return json({ error: "Instagram is connected through Postiz (Add Channel -> Instagram)." }, 409);
+      }
       if (pathname === "/auth/authorize" && method === "GET") return handleAuthorize(env);
       if (pathname === "/auth/status" && method === "GET") return handleStatus(env);
       if (pathname === "/auth/disconnect" && method === "POST") return handleDisconnect(env);
@@ -72,15 +87,21 @@ export default {
     // Matched static files are served by the assets binding automatically; this handles
     // client-side routes by returning index.html for navigations.
     const assetRes = await env.ASSETS.fetch(req);
-    if (assetRes.status !== 404) return assetRes;
+    if (assetRes.status !== 404) return withFrameAncestors(assetRes, env);
     if (method === "GET") {
-      return env.ASSETS.fetch(new Request(new URL("/index.html", url.origin), req));
+      return withFrameAncestors(await env.ASSETS.fetch(new Request(new URL("/index.html", url.origin), req)), env);
     }
     return json({ error: "not found" }, 404);
   },
 
   async scheduled(event: ScheduledController, env: Env): Promise<void> {
     if (event.cron === REFRESH_CRON) {
+      // Postiz owns (and refreshes) the token when it manages the connection; just follow it.
+      if (isPostizManaged(env)) {
+        const synced = await syncInstagramFromPostiz(env, { force: true });
+        console.log(`[chatmany] Postiz Instagram sync: ${synced.status}${synced.detail ? ` (${synced.detail})` : ""}`);
+        return;
+      }
       const result = await refreshTokenIfDue(env);
       console.log(`[chatmany] token refresh: ${result.status}`);
       return;
@@ -95,6 +116,19 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
+/** POST /auth/sso { ticket } -> { token } when the ticket was signed by Postiz and is still fresh. */
+async function handleSso(env: Env, req: Request): Promise<Response> {
+  if (!env.POSTIZ_SSO_SECRET) return json({ error: "single sign-on is not configured" }, 404);
+  let ticket = "";
+  try {
+    ticket = String(((await req.json()) as { ticket?: unknown }).ticket ?? "");
+  } catch {
+    return json({ error: "invalid body" }, 400);
+  }
+  if (!(await verifyTicket(env.POSTIZ_SSO_SECRET, ticket))) return json({ error: "unauthorized" }, 401);
+  return json({ token: await issueSession(env.POSTIZ_SSO_SECRET) });
+}
+
 /**
  * Run comment + message polls, honoring the caller's poll interval (>= cron granularity).
  * claimPollSlot is an atomic claim, not a plain check-then-act read/write — see its doc comment
@@ -104,6 +138,10 @@ export default {
 async function runPoll(env: Env, interval: number): Promise<void> {
   const claimed = await claimPollSlot(env.DB, interval);
   if (!claimed) return; // not due yet, or another invocation already claimed this slot
+
+  // Pick up a token Postiz connected or refreshed (throttled inside; a no-op when not managed).
+  const synced = await syncInstagramFromPostiz(env);
+  if (synced.status === "error") console.warn(`[chatmany] Postiz Instagram sync failed: ${synced.detail}`);
 
   const rt = await buildRuntime(env);
   if (!rt) return;
@@ -119,5 +157,11 @@ async function runPoll(env: Env, interval: number): Promise<void> {
     await pollMessages(rt, env.DB);
   } catch (e) {
     console.warn(`[chatmany] pollMessages failed: ${e instanceof Error ? e.message : e}`);
+  }
+  try {
+    const followups = await rt.engine.sendDueFollowups();
+    if (followups > 0) console.log(`[chatmany] sent ${followups} follow-up(s)`);
+  } catch (e) {
+    console.warn(`[chatmany] follow-ups failed: ${e instanceof Error ? e.message : e}`);
   }
 }

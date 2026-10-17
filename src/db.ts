@@ -211,6 +211,10 @@ export interface ConversationRow {
   /** How many times we have re-sent the opening button to someone who replied without pressing it.
    *  Capped — see engine.resendOpening. */
   tap_retries: number;
+  /** When the reward went out (starts the follow-up clock). Null until delivered. */
+  delivered_at: number | null;
+  /** 1 once the follow-up DM was sent. */
+  followup_sent: number;
   updated_at: number;
   created_at: number;
 }
@@ -287,10 +291,23 @@ export async function updateConversation(
   db: D1Database,
   igsid: string,
   campaignId: string,
-  patch: Partial<Pick<ConversationRow, "state" | "email" | "followed" | "email_retries" | "follow_retries" | "tap_retries">>,
+  patch: Partial<
+    Pick<
+      ConversationRow,
+      "state" | "email" | "followed" | "email_retries" | "follow_retries" | "tap_retries" | "delivered_at" | "followup_sent"
+    >
+  >,
 ): Promise<void> {
   const sets: string[] = [];
   const binds: unknown[] = [];
+  if (patch.delivered_at !== undefined) {
+    sets.push("delivered_at = ?");
+    binds.push(patch.delivered_at);
+  }
+  if (patch.followup_sent !== undefined) {
+    sets.push("followup_sent = ?");
+    binds.push(patch.followup_sent);
+  }
   if (patch.state !== undefined) {
     sets.push("state = ?");
     binds.push(patch.state);
@@ -322,6 +339,62 @@ export async function updateConversation(
     .prepare(`UPDATE conversations SET ${sets.join(", ")} WHERE igsid = ? AND campaign_id = ?`)
     .bind(...binds)
     .run();
+}
+
+// ---- tracked reward links (follow-ups) ----
+
+export interface TrackedLink {
+  token: string;
+  campaign_id: string;
+  igsid: string;
+  url: string;
+  created_at: number;
+  clicked_at: number | null;
+}
+
+/** The person's tracked link for a campaign, created on first use (one per person per campaign). */
+export async function trackedLinkFor(db: D1Database, campaignId: string, igsid: string, url: string): Promise<string> {
+  const existing = await db
+    .prepare("SELECT token FROM tracked_links WHERE igsid = ? AND campaign_id = ?")
+    .bind(igsid, campaignId)
+    .first<{ token: string }>();
+  if (existing) return existing.token;
+  const token = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+  await db
+    .prepare("INSERT INTO tracked_links (token, campaign_id, igsid, url, created_at) VALUES (?, ?, ?, ?, ?)")
+    .bind(token, campaignId, igsid, url, now())
+    .run();
+  return token;
+}
+
+export async function getTrackedLink(db: D1Database, token: string): Promise<TrackedLink | null> {
+  return await db.prepare("SELECT * FROM tracked_links WHERE token = ?").bind(token).first<TrackedLink>();
+}
+
+/** Record a click. Returns true only for the first one, so the click is counted once. */
+export async function markLinkClicked(db: D1Database, token: string): Promise<boolean> {
+  const res = await db
+    .prepare("UPDATE tracked_links SET clicked_at = ? WHERE token = ? AND clicked_at IS NULL")
+    .bind(now(), token)
+    .run();
+  return (res.meta.changes ?? 0) > 0;
+}
+
+/** Delivered conversations still waiting on a follow-up decision, delivered after `since`. */
+export async function followupCandidates(
+  db: D1Database,
+  since: number,
+): Promise<{ igsid: string; campaign_id: string; delivered_at: number; clicked_at: number | null }[]> {
+  const rows = await db
+    .prepare(
+      `SELECT c.igsid, c.campaign_id, c.delivered_at, t.clicked_at
+         FROM conversations c
+         LEFT JOIN tracked_links t ON t.igsid = c.igsid AND t.campaign_id = c.campaign_id
+        WHERE c.state = 'DONE' AND c.followup_sent = 0 AND c.delivered_at IS NOT NULL AND c.delivered_at >= ?`,
+    )
+    .bind(since)
+    .all<{ igsid: string; campaign_id: string; delivered_at: number; clicked_at: number | null }>();
+  return rows.results ?? [];
 }
 
 // ---- events ----
@@ -380,6 +453,8 @@ export async function eventCountsByType(
     follow_confirmed: 0,
     email_captured: 0,
     delivered: 0,
+    link_clicked: 0,
+    followup_sent: 0,
   };
   const rows = campaignId
     ? await db

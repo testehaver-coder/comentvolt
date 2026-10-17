@@ -34,6 +34,9 @@ migrations_dir = "schema"
 [assets]
 directory = "./public"
 binding = "ASSETS"
+# The UI pages go through the Worker so it can add the frame-ancestors policy (POSTIZ_APP_URL)
+# that keeps any site other than Postiz from framing them. Other static files are served directly.
+run_worker_first = ["/", "/index.html"]
 
 [vars]
 # Public, non-secret configuration. Secrets (APP_SECRET, OWNER_TOKEN) go via `wrangler secret put`.

@@ -13,6 +13,7 @@ import type {
   State,
 } from "../types";
 import { InstagramApiError } from "../api/client";
+import { ANY_MEDIA } from "../types";
 import { commentTriggers, extractEmail } from "./match";
 import {
   FOLLOW_PAYLOAD,
@@ -36,9 +37,12 @@ import {
   getAllConversations,
   getOpenConversations,
   isCommentProcessed,
+  followupCandidates,
   logEvent,
   markCommentProcessed,
+  now,
   releaseSend,
+  trackedLinkFor,
   updateConversation,
 } from "../db";
 import type { ConversationRow } from "../db";
@@ -61,6 +65,9 @@ const DEFAULT_FOLLOW_BUTTON = "✅ I followed";
  * the tail of a label is plainly better than the message never arriving.
  */
 const MAX_BUTTON_TITLE = 20;
+
+/** How long after delivery a follow-up may still go out: inside Instagram's 24 h window, with margin. */
+const FOLLOWUP_WINDOW_S = 23 * 3600;
 
 /**
  * `raw` is typed as a string, but campaigns arriving through /config/import or written straight
@@ -129,6 +136,10 @@ export class Engine {
     private readonly db: D1Database,
     private readonly client: InstagramClient,
     private readonly queue: SendQueue,
+    /** The connected account's own IG user id: its comments (e.g. our public replies) never trigger. */
+    private readonly ownerId?: string,
+    /** This Worker's public address, for tracked reward links (follow-ups). Without it, no tracking. */
+    private readonly publicUrl?: string,
   ) {}
 
   // ---- comments ----
@@ -141,15 +152,21 @@ export class Engine {
   async handleComment(evt: NormalizedComment, activeCampaigns?: Campaign[]): Promise<void> {
     if (await isCommentProcessed(this.db, evt.comment_id)) return;
     if (!evt.igsid) return; // cannot correlate future messages without the commenter's IGSID
+    // Our own comments — the public replies this engine posts, or the owner chatting under a post —
+    // are never leads. With an "any word" campaign they would otherwise DM the account itself.
+    if (this.ownerId && evt.igsid === this.ownerId) return;
 
     const all = activeCampaigns ?? (await getActiveCampaigns(this.db));
-    const campaigns = all.filter((c) => c.media_id === evt.media_id);
+    const triggered = (c: Campaign) => commentTriggers(evt.text, c.keywords, c.exclude, c.match_any);
+    // A campaign set up for this very post takes precedence: "any post" campaigns only answer a
+    // comment that no post-specific campaign answered, so nobody gets two opening DMs for one comment.
+    const specific = all.filter((c) => c.media_id === evt.media_id && triggered(c));
+    const campaigns = specific.length > 0 ? specific : all.filter((c) => c.media_id === ANY_MEDIA && triggered(c));
     let matchedCampaignId = "-";
     // A retryable opening-send failure leaves the comment unprocessed so the next poll retries it.
     let pendingRetry = false;
 
     for (const campaign of campaigns) {
-      if (!commentTriggers(evt.text, campaign.keywords, campaign.exclude)) continue;
       matchedCampaignId = campaign.campaign_id;
 
       // Public actions are per-comment (independent toggles), guarded so re-polls don't repeat them.
@@ -481,7 +498,7 @@ export class Engine {
         break;
       }
       case "DELIVER": {
-        const text = campaign.copy.delivery.replaceAll("{reward}", campaign.reward.value);
+        const text = campaign.copy.delivery.replaceAll("{reward}", await this.rewardLink(campaign, igsid));
         const ok = await this.trySend(
           () => this.client.sendText(igsid, text),
           "delivery",
@@ -489,6 +506,7 @@ export class Engine {
         );
         if (!ok) return;
         await commit("DONE", "delivered");
+        await this.recordDelivery(campaign, igsid);
         break;
       }
       default:
@@ -514,6 +532,76 @@ export class Engine {
       "follow_gate",
       `follow_gate:${campaign.campaign_id}:${igsid}`,
     );
+  }
+
+  // ---- follow-ups ----
+
+  /**
+   * The reward as it goes into a DM. When the campaign has a follow-up and chatmany knows its public
+   * address, the link is swapped for a tracked one (/r/<token>, which records the click and
+   * redirects to the real link) — that is the only way to tell who never opened it. Otherwise the
+   * reward goes out exactly as written.
+   */
+  private async rewardLink(campaign: Campaign, igsid: string): Promise<string> {
+    const value = campaign.reward.value;
+    if (!this.publicUrl || !campaign.followup?.enabled || campaign.reward.type !== "link") return value;
+    try {
+      const token = await trackedLinkFor(this.db, campaign.campaign_id, igsid, value);
+      return `${this.publicUrl.replace(/\/+$/, "")}/r/${token}`;
+    } catch (e) {
+      // tracked_links missing (code deployed before migration 0006): the reward must still go out,
+      // so send the plain link — the follow-up simply cannot run for this person.
+      console.warn(`[chatmany] tracked link unavailable, sending the plain link: ${msg(e)}`);
+      return value;
+    }
+  }
+
+  /**
+   * Stamp delivered_at, which starts the follow-up clock. A separate write from the state change on
+   * purpose: on a database not yet migrated to 0006 it fails, and that must cost only the follow-up,
+   * never the DONE state of a person who already has their reward.
+   */
+  private async recordDelivery(campaign: Campaign, igsid: string): Promise<void> {
+    try {
+      await updateConversation(this.db, igsid, campaign.campaign_id, { delivered_at: now() });
+    } catch (e) {
+      console.warn(`[chatmany] could not record delivery time (follow-ups off for ${igsid}): ${msg(e)}`);
+    }
+  }
+
+  /**
+   * Send the follow-up to people who received the link and never opened it.
+   *
+   * Instagram allows messaging someone again only within 24 hours of their last interaction, and
+   * for these people that interaction is the tap that made us deliver — so the clock runs from
+   * delivered_at. A follow-up goes out once its campaign's delay has passed, never later than
+   * FOLLOWUP_WINDOW_S after delivery, at most once per person and campaign, and only for active
+   * campaigns. Nothing is sent without tracked links: blind, it would nag people who did click.
+   * Returns how many follow-ups went out.
+   */
+  async sendDueFollowups(ts: number = now()): Promise<number> {
+    if (!this.publicUrl) return 0;
+    const rows = await followupCandidates(this.db, ts - FOLLOWUP_WINDOW_S);
+    if (rows.length === 0) return 0;
+    const active = new Map((await getActiveCampaigns(this.db)).map((c) => [c.campaign_id, c]));
+    let sent = 0;
+    for (const row of rows) {
+      const campaign = active.get(row.campaign_id);
+      const followup = campaign?.followup;
+      if (!campaign || !followup?.enabled || campaign.reward.type !== "link" || row.clicked_at) continue;
+      if (ts < row.delivered_at + followup.delay_minutes * 60) continue;
+      const text = followup.text.replaceAll("{reward}", await this.rewardLink(campaign, row.igsid));
+      const ok = await this.trySend(
+        () => this.client.sendText(row.igsid, text),
+        "followup",
+        `followup:${campaign.campaign_id}:${row.igsid}`,
+      );
+      if (!ok) continue;
+      await updateConversation(this.db, row.igsid, campaign.campaign_id, { followup_sent: 1 });
+      await logEvent(this.db, campaign.campaign_id, "followup_sent", row.igsid);
+      sent++;
+    }
+    return sent;
   }
 
   // ---- send helpers ----

@@ -5,7 +5,7 @@
 import { getActiveCampaigns, countEventsGlobal, kvGet, kvSet, now } from "../db";
 import type { Runtime } from "../runtime";
 import { toUnixSeconds } from "../runtime";
-import type { NormalizedComment } from "../types";
+import { ANY_MEDIA, type NormalizedComment } from "../types";
 
 // Private replies cap ~750/hr; DMs ~200/hr. Openings are private replies that open a DM, so we
 // pace against the stricter DM limit with margin.
@@ -24,8 +24,12 @@ export async function pollComments(rt: Runtime, db: D1Database): Promise<void> {
     return;
   }
 
-  // Dedupe media so shared media across campaigns is fetched once.
-  const mediaIds = [...new Set(campaigns.map((c) => c.media_id))];
+  // Dedupe media so shared media across campaigns is fetched once. An "any post" campaign has no
+  // single media to read, so it widens the poll to the account's most recent posts.
+  const mediaIds = [...new Set(campaigns.map((c) => c.media_id).filter((id) => id !== ANY_MEDIA))];
+  if (campaigns.some((c) => c.media_id === ANY_MEDIA)) {
+    for (const id of await recentMediaIds(rt, db)) if (!mediaIds.includes(id)) mediaIds.push(id);
+  }
   let handled = 0;
   let failed = 0;
   let lastError = "";
@@ -87,6 +91,36 @@ export async function pollComments(rt: Runtime, db: D1Database): Promise<void> {
     }));
   } else if (await kvGet(db, ERROR_KEY)) {
     await kvSet(db, ERROR_KEY, "");
+  }
+}
+
+/**
+ * The newest posts an "any post" campaign watches in polling mode. Bounded on purpose: every
+ * watched post costs one comments read per tick against the account's API budget, and comments
+ * cluster on the latest posts anyway. Webhook mode is not limited by this — Instagram pushes
+ * comments from every post. The list itself is cached for a few minutes.
+ */
+const ANY_MEDIA_RECENT = 5;
+const RECENT_MEDIA_KEY = "recent_media";
+const RECENT_MEDIA_TTL_S = 600;
+
+async function recentMediaIds(rt: Runtime, db: D1Database): Promise<string[]> {
+  const cached = await kvGet(db, RECENT_MEDIA_KEY);
+  if (cached) {
+    try {
+      const { at, ids } = JSON.parse(cached) as { at: number; ids: string[] };
+      if (now() - at < RECENT_MEDIA_TTL_S && Array.isArray(ids)) return ids;
+    } catch {
+      /* stale or malformed: refetch below */
+    }
+  }
+  try {
+    const ids = (await rt.client.getMedia(ANY_MEDIA_RECENT)).map((m) => m.id);
+    await kvSet(db, RECENT_MEDIA_KEY, JSON.stringify({ at: now(), ids }));
+    return ids;
+  } catch (e) {
+    console.warn(`[chatmany] getMedia for "any post" campaigns failed: ${e instanceof Error ? e.message : e}`);
+    return [];
   }
 }
 

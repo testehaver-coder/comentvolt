@@ -81,6 +81,20 @@ export class FakeClient {
     this.guardAfter("text");
     return { message_id: "m" };
   }
+  // ---- reads used by the comment poller ----
+  /** Newest-first media the account "has"; tests set it to model the profile grid. */
+  media: { id: string }[] = [];
+  /** Comments per media id. */
+  comments: Record<string, { id: string; text: string; from: { id: string; username?: string }; timestamp: string }[]> = {};
+  getMediaCalls = 0;
+  async getMedia(limit = 25) {
+    this.getMediaCalls++;
+    return this.media.slice(0, limit);
+  }
+  async getComments(mediaId: string) {
+    return this.comments[mediaId] ?? [];
+  }
+
   // ---- webhook subscription (admin route) ----
   /** What Meta currently reports for this account. Tests set this to model a partial subscription. */
   subscribedFields: string[] = [];

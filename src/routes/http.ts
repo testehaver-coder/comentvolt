@@ -1,6 +1,7 @@
 // Small HTTP response helpers + owner-token auth guard.
 
 import type { Env } from "../types";
+import { timingSafeEqual, verifySession } from "../auth/session";
 
 export function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body, null, 2), {
@@ -24,20 +25,32 @@ export function redirect(location: string, status = 302): Response {
 }
 
 /**
- * Owner auth: the single-owner token in `Authorization: Bearer <OWNER_TOKEN>` or `?token=`.
+ * The UI is meant to be framed only by Postiz's Automations page (POSTIZ_APP_URL). Pages get a
+ * frame-ancestors policy so no other site can frame them (clickjacking); without the setting
+ * nothing changes.
+ */
+export function withFrameAncestors(res: Response, env: Env): Response {
+  if (!env.POSTIZ_APP_URL || !(res.headers.get("content-type") ?? "").includes("text/html")) return res;
+  let origin: string;
+  try {
+    origin = new URL(env.POSTIZ_APP_URL).origin;
+  } catch {
+    return res;
+  }
+  const framed = new Response(res.body, res);
+  framed.headers.set("content-security-policy", `frame-ancestors 'self' ${origin}`);
+  return framed;
+}
+
+/**
+ * Owner auth: the single-owner token — or, when POSTIZ_SSO_SECRET is set, a session token
+ * issued by /auth/sso (see auth/session.ts) — in `Authorization: Bearer <token>` or `?token=`.
  * Returns true when authorized. Uses a constant-time compare.
  */
-export function isOwner(req: Request, url: URL, env: Env): boolean {
-  if (!env.OWNER_TOKEN) return false;
+export async function isOwner(req: Request, url: URL, env: Env): Promise<boolean> {
   const header = req.headers.get("authorization") ?? "";
   const bearer = header.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : "";
   const supplied = bearer || url.searchParams.get("token") || "";
-  return timingSafeEqual(supplied, env.OWNER_TOKEN);
-}
-
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let mismatch = 0;
-  for (let i = 0; i < a.length; i++) mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return mismatch === 0;
+  if (env.OWNER_TOKEN && timingSafeEqual(supplied, env.OWNER_TOKEN)) return true;
+  return !!env.POSTIZ_SSO_SECRET && verifySession(env.POSTIZ_SSO_SECRET, supplied);
 }
