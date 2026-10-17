@@ -1409,7 +1409,8 @@ function renderPreview() {
     ? new Date(media.timestamp).toLocaleDateString(i18n.language() === "pt" ? "pt-BR" : "en-US", { day: "numeric", month: "short", year: "numeric" })
     : "";
   const comments = (media.comments_count ?? 0) + (d.public_reply.enabled ? 1 : 0);
-  const reply = d.public_reply.enabled && (d.public_reply.texts[0] || "");
+  let reply = d.public_reply.enabled && (d.public_reply.texts[0] || "");
+  if (reply) reply = `@User ${reply}`;
 
   const postHeader = `
     <div class="ig-appbar">${PHONE_ICON.back}

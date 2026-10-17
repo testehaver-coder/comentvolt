@@ -189,7 +189,11 @@ export class Engine {
   private async runPublicActions(campaign: Campaign, evt: NormalizedComment): Promise<void> {
     if (campaign.public_reply?.enabled && campaign.public_reply.texts.length > 0) {
       if (await claimCommentAction(this.db, evt.comment_id, "public_reply")) {
-        const text = pickRotating(campaign.public_reply.texts, evt.comment_id);
+        let text = pickRotating(campaign.public_reply.texts, evt.comment_id);
+        // Prepend @mention of the commenter to make the reply address them directly
+        if (evt.username) {
+          text = `@${evt.username} ${text}`;
+        }
         await this.trySend(() => this.client.replyToComment(evt.comment_id, text), "public_reply");
       }
     }
