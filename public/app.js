@@ -1085,8 +1085,6 @@ function renderSections() {
           <label class="field"><span class="label">Public replies (one per line, rotated)</span>
             <textarea id="pr_texts">${esc((d.public_reply.texts || []).join("\n"))}</textarea></label>
         </div>
-        <div class="toggle-row disabled"><div><div class="tr-title">Like their comment</div><div class="tr-sub">Not possible — Instagram's API has no way to like a comment.</div></div>
-          <label class="switch"><input type="checkbox" disabled/><span class="slider"></span></label></div>
       </div>
     </div>
 
